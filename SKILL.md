@@ -121,14 +121,14 @@ Lists all available databases.
 
 #### `db create`
 
-Creates a new database. Automatically creates a secret with the connection string. Without `--deployment` the secret is named `DATABASE_URL`; with `--deployment <alias>` it is named `DATABASE_URL_<UPPERCASED_UNDERSCORED_NAME>` (e.g. `DATABASE_URL_MY_DB` for database `my_db`).
+Creates a new database. Automatically creates a `DATABASE_URL` secret with the connection string.
 
 -   **Usage:** `dibbla db create [name]`
 -   **Arguments:**
     -   `name` (optional): The name for the new database.
 -   **Flags:**
     -   `--name <name>`: Alternative way to provide the database name.
-    -   `--deployment <alias>`: Scope the database and its auto-created secret to a specific deployment. The scoped secret is named `DATABASE_URL_<UPPERCASED_UNDERSCORED_NAME>` (e.g. `DATABASE_URL_MY_DB` for `my_db`). If `--deployment` is omitted, the secret is global and named `DATABASE_URL`.
+    -   `--deployment <alias>`: Scope the database and its `DATABASE_URL` secret to a specific deployment. If omitted, the secret is global (available to all deployments).
 -   **Example:** `dibbla db create --name my-new-db` — **Scoped:** `dibbla db create mydb --deployment myapp`
 
 #### `db delete`

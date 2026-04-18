@@ -73,10 +73,8 @@ The shell installer drops the binary into `~/.local/bin` and adjusts `PATH` if n
 - Environment variables set via `deploy -e` or `apps update -e` persist across updates — you only need to pass them once.
 - **Login guard:** Use `--require-login` to require authentication. Combine with `--access-policy invite_only` to restrict to invited users, or `all_members` for org-wide access. Use `--google-scopes` to request additional Google OAuth scopes (e.g. Drive, Calendar).
 - Use `--quiet` / `-q` on `db list`, `db delete`, `db connect` for machine-readable output in scripts.
-- `db create --deployment <alias>` scopes the database and its auto-created secret to a specific deployment. The scoped secret is named `DATABASE_URL_<UPPERCASED_UNDERSCORED_NAME>` (e.g. `DATABASE_URL_MY_DB` for database `my_db`), **not** a plain `DATABASE_URL` — app code must read the suffixed env var.
+- `db create --deployment <alias>` scopes the database and its auto-created `DATABASE_URL` secret to a specific deployment.
 - `db connect` prints a psql-compatible connection string via the Dibbla database proxy. Use `-q` for scripting: `psql $(dibbla db connect mydb -q)`.
-- **524 on deploy ≠ failure.** `dibbla deploy` holds a single HTTP connection during the backend build; builds over ~100s may return a Cloudflare 524 on the client even when the backend succeeds. Wait 2–5 minutes, then run `dibbla apps list` to check. Do **not** retry with `--force` — use `--update` if you must retry.
-- Managed Postgres uses a **self-signed TLS cert**. App clients (pg, psycopg2, Prisma) need explicit SSL handling — see `reference.md` "TLS for application database clients" for working snippets.
 
 **Pre-deploy guardrails:** Before calling `dibbla deploy`, you MUST complete the pre-deploy checklist and present findings to the user. Always wait for explicit user confirmation before deploying or fixing issues — never deploy autonomously. The guardrails workflow also writes a `REVIEW.md` file to the project root — the platform reads this and displays a review status indicator in the dashboard. See [guardrails.md](guardrails.md) for the full checklist.
 
