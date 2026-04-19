@@ -107,6 +107,54 @@ dibbla template install crm --force
 
 ---
 
+## Skills (teach AI coding agents about the CLI)
+
+Install the bundled `dibbla` skill so every coding agent in the project reads it automatically. The skill content is embedded in the CLI binary — no network needed, and the skill version is locked to your installed `dibbla` version.
+
+```bash
+# see what skills are bundled (one for now: 'dibbla')
+dibbla skills list
+
+# install into the current project
+dibbla skills install dibbla
+# → writes .claude/skills/dibbla/{SKILL.md,examples.md,guardrails.md,reference.md}
+#   and an AGENTS.md + GEMINI.md pointer block at the project root
+
+# install into $HOME once so every project picks up the skill
+dibbla skills install dibbla --user
+
+# Claude Code only (skip AGENTS.md and GEMINI.md)
+dibbla skills install dibbla --no-agents
+
+# re-run is a clean no-op if nothing changed;
+# use --force to restore skill files that were edited locally
+dibbla skills install dibbla --force
+```
+
+**What each output does:**
+
+| File | Used by |
+|------|---------|
+| `.claude/skills/dibbla/SKILL.md` | Claude Code (native skill format, gives `/dibbla` slash command) |
+| `AGENTS.md` | Cursor, Opencode, Codex, Copilot, Windsurf, Aider, Zed, Warp, RooCode (AGENTS.md open standard) |
+| `GEMINI.md` | Gemini CLI (its default context filename) |
+
+`AGENTS.md` and `GEMINI.md` use a marker-delimited block (`<!-- >>> dibbla skill >>> -->` … `<!-- <<< dibbla skill <<< -->`). Running `dibbla skills install dibbla` again replaces only that block — any other content you've added to those files is preserved byte-for-byte.
+
+**Inside a `dibbla-task.yaml` bootstrap step:**
+
+```yaml
+- id: install-skills
+  name: "Install Dibbla Skill"
+  type: command
+  run: "dibbla skills install dibbla"
+  depends_on: ["update-dibbla"]
+```
+
+The `depends_on: ["update-dibbla"]` ensures the CLI is fresh enough to have the `skills` command before this step runs.
+
+---
+
 ## Feedback
 
 ```bash

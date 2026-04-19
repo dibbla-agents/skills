@@ -1,6 +1,6 @@
 ---
 name: dibbla
-description: Use the Dibbla CLI to scaffold projects, run dibbla-task.yaml pipelines locally (dibbla run), discover and install project templates (dibbla template list/install), deploy apps, and manage applications, databases, secrets, and workflows on the Dibbla platform. Use when the user wants to run a local task file or a template from a URL, install a starter template, log in (including from non-TTY contexts like Claude Code via `dibbla login --browser`), deploy, list/update/delete apps, create/list/delete/dump/restore databases, manage secrets, or manage workflows (create/execute/validate workflows, manage nodes/edges/inputs/tools, revisions, and browse functions).
+description: Use the Dibbla CLI to scaffold projects, run dibbla-task.yaml pipelines locally (dibbla run), discover and install project templates (dibbla template list/install), install this skill into any project so other AI coding agents read it too (dibbla skills install dibbla), deploy apps, and manage applications, databases, secrets, and workflows on the Dibbla platform. Use when the user wants to run a local task file or a template from a URL, install a starter template, install the dibbla skill into a project or home dir for use with Claude Code/Cursor/Gemini CLI/Opencode/Codex, log in (including from non-TTY contexts like Claude Code via `dibbla login --browser`), deploy, list/update/delete apps, create/list/delete/dump/restore databases, manage secrets, or manage workflows (create/execute/validate workflows, manage nodes/edges/inputs/tools, revisions, and browse functions).
 ---
 
 # Dibbla CLI
@@ -28,6 +28,7 @@ The shell installer drops the binary into `~/.local/bin` and adjusts `PATH` if n
 |------------|----------|
 | Run        | `run [path\|url]`, `run --preview`, `run --env KEY=VAL`, `run --env-file <file>`, `run --work-dir <dir>`, `run --format plain\|gh` |
 | Template   | `template list [--refresh] [-v]`, `template install <id> [<dir>] [--force]` |
+| Skills     | `skills list`, `skills install <id>` (`--user`, `--force`, `--no-agents`) — install AI-agent guidance into `.claude/skills/` + `AGENTS.md` + `GEMINI.md` |
 | Login      | `login [api_url]`, `login --browser`, `login --api-key <token>`, `login --api-url <url>`, `login --write-env`, `login --no-keychain`, `logout` |
 | Feedback   | `feedback <message>`, `feedback list`, `feedback delete <id>` |
 | Deploy     | `deploy [path] [--alias name] [--require-login] [--access-policy] [--google-scopes]` — deploy from directory |
@@ -92,6 +93,13 @@ The shell installer drops the binary into `~/.local/bin` and adjusts `PATH` if n
 - `dibbla run <https-url>` fetches and executes a yaml from the network. **This is equivalent to `curl | bash`** — only run yamls from sources the user trusts (e.g. `github.com/dibbla-agents/*`). Work-dir defaults to the user's invocation CWD, so bootstrap clones land in the expected directory rather than in a temp dir.
 - `dibbla template install <id>` is ergonomic sugar over `mkdir ./<template-path> && cd ./<template-path> && dibbla run <bootstrap-url>`. It refuses if the destination directory exists; pass `--force` to reuse. Use `dibbla template list` to see available ids.
 - Prefer `dibbla run --preview` or `dibbla template list` before actually running, so the user can see what will execute.
+
+**Installing this skill into a project (so other agents see it too):**
+- `dibbla skills install dibbla` writes the skill files into `./.claude/skills/dibbla/` plus `AGENTS.md` and `GEMINI.md` pointers at the project root. Every major coding agent then picks up the guidance automatically — Claude Code via its native skill path, Cursor/Opencode/Codex/Copilot/Windsurf/Aider via `AGENTS.md` (the 2026 open standard), Gemini CLI via `GEMINI.md`.
+- The skill content is embedded in the CLI binary (`go:embed`), so no network is required and the skill version is locked to the CLI version the user has installed. Run `dibbla --version` to see which one.
+- Flags: `--user` installs into `$HOME` for machine-wide coverage instead of the current directory; `--no-agents` skips `AGENTS.md` and `GEMINI.md` (Claude Code only); `--force` overwrites skill files that have been edited locally. Unknown files inside `.claude/skills/<id>/` are always preserved.
+- The AGENTS.md / GEMINI.md pointer block is marker-delimited (`<!-- >>> dibbla skill >>> -->` … `<!-- <<< dibbla skill <<< -->`) so existing AGENTS.md content outside the markers is preserved byte-for-byte across reruns.
+- Re-running is idempotent — if nothing changed, nothing is rewritten (no mtime bump). Use `dibbla skills list` to see what skills the current CLI ships.
 
 ## Additional resources
 

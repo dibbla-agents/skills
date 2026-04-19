@@ -91,6 +91,49 @@ Cache lives at `~/.dibbla/templates-cache.json`. Resolution is simple: a fresh c
 
 ---
 
+## skills
+
+Install AI-coding-agent skills embedded in this CLI into a project (or the user's home dir). Skills are compiled into the binary via `//go:embed` — no network is required, and the installed skill always matches the version of `dibbla` the user has on `PATH`.
+
+Coverage: Claude Code reads `.claude/skills/<id>/SKILL.md` natively (gives a `/<id>` slash command). Cursor, Opencode, Codex, Copilot, Windsurf, Aider, Zed, Warp, and RooCode read `AGENTS.md` at project root (the 2026 open standard). Gemini CLI defaults to `GEMINI.md`, which the install also writes (same content as `AGENTS.md`) so Gemini works without editing `.gemini/settings.json`.
+
+### skills list
+
+| Item | Details |
+|------|---------|
+| **Usage** | `dibbla skills list` |
+| **Output** | Table: `ID  DESCRIPTION` — one row per skill bundled with this CLI version |
+| **Note** | The list is version-locked to the binary; upgrade the CLI to get newer skills |
+
+### skills install
+
+| Item | Details |
+|------|---------|
+| **Usage** | `dibbla skills install <id>` |
+| **Arguments** | `<id>` (required) — id from `dibbla skills list` (currently only `dibbla`) |
+| **Flags** | `--user` — install into `$HOME` instead of the current working directory |
+|  | `--force` — overwrite skill files that have been edited locally. Only the embedded filenames are touched; user-added files inside `.claude/skills/<id>/` are always preserved |
+|  | `--no-agents` — skip writing `AGENTS.md` and `GEMINI.md` at the target root (Claude Code only) |
+| **Writes** | `<root>/.claude/skills/<id>/{SKILL.md,examples.md,guardrails.md,reference.md}` |
+|  | `<root>/AGENTS.md` — marker-delimited pointer block (`<!-- >>> dibbla skill >>> -->` … `<!-- <<< dibbla skill <<< -->`). Content outside the markers is preserved byte-for-byte across reruns |
+|  | `<root>/GEMINI.md` — same block, for Gemini CLI's default context filename |
+| **Idempotent** | Re-running is safe. Identical bytes are no-ops (no mtime bump). CRLF vs LF line endings on AGENTS.md / GEMINI.md are preserved |
+| **Atomic** | Each file is written via temp-file + `rename`. No partial skill dir if the process is killed mid-install |
+| **Offline** | Yes — the skill is compiled into the binary; version always matches `dibbla --version` |
+| **Exit code** | `0` on success; `1` on conflict without `--force` or any write failure |
+
+**Canonical invocations:**
+
+| Context | Command |
+|---|---|
+| Project-local install (default) | `dibbla skills install dibbla` |
+| Machine-wide (every project sees it) | `dibbla skills install dibbla --user` |
+| Claude Code only, no AGENTS.md / GEMINI.md | `dibbla skills install dibbla --no-agents` |
+| Restore skill files after local edits | `dibbla skills install dibbla --force` |
+| Inside a `dibbla-task.yaml` bootstrap step | `dibbla skills install dibbla` (with `depends_on: ["update-dibbla"]` so the CLI is fresh enough) |
+
+---
+
 ## feedback
 
 Send, list, and manage feedback.
