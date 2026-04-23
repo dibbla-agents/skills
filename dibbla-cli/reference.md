@@ -4,6 +4,136 @@ Complete usage, arguments, and flags for all commands.
 
 ---
 
+## login
+
+Authenticate with the Dibbla API and store the token in the OS credential store.
+
+| Item | Details |
+|------|---------|
+| **Usage** | `dibbla login [api_url]` |
+| **Arguments** | `api_url` (optional) — API endpoint (e.g. `api.dibbla.net` or `https://api.dibbla.net`). If omitted, the URL resolves in this order: `$DIBBLA_API_URL` → `$DIBBLA_AUTH_SERVICE_URL` → default `https://api.dibbla.com`. Both env names are read from `./.env` (CWD) as well as the shell environment. |
+| **Flags** | `--browser` — skip the interactive menu; go directly to browser OAuth. Works in non-TTY contexts (Claude Code `!` prefix, agent shells) because the flow uses a localhost callback, not stdin. |
+|  | `--api-key <token>` — pass a pre-generated token; works in any context |
+|  | `--api-url <url>` — explicit API endpoint URL (alternative to the positional arg; **mutually exclusive** with it — specifying both is an error). Useful in long command lines like yaml steps where positional args are easy to miss. |
+|  | `--write-env` — after successful validation, write `DIBBLA_API_TOKEN` + `DIBBLA_API_URL` to `./.env` in the current working directory and ensure `.env` is listed in `./.gitignore`. Writes are atomic (tmp-file → rename) and merge in place — existing keys and comments are preserved; only the two DIBBLA keys are replaced. Unix file perms are 0600. Requires CLI ≥ v1.2.4. |
+|  | `--no-keychain` — skip the OS keyring persist step. Token is validated against the API but not saved to macOS Keychain / Windows Credential Manager / libsecret. Intended for cloud VMs / SSH / Docker where keyring services aren't installed. Combine with `--write-env` to persist credentials to `./.env` instead of the keychain. Requires CLI ≥ v1.2.4. |
+| **Interactive** | Real TTY only: picker for "Log in with browser" or "Paste an API token" |
+| **Note** | In CI or sandbox sessions, set `DIBBLA_API_TOKEN` (and optionally `DIBBLA_API_URL`) in the shell environment or `./.env` — the CLI reads both, and `login` is not required. Use `DIBBLA_API_URL` as the canonical name; `DIBBLA_AUTH_SERVICE_URL` is an internal compat alias. |
+
+**Canonical flag combinations:**
+
+| Context | Command |
+|---|---|
+| Laptop (keychain only, default) | `dibbla login` (interactive) or `dibbla login --browser` |
+| Laptop with project `.env` as well | `dibbla login --browser --write-env` or `dibbla login --api-key=<t> --write-env` |
+| Cloud VM / SSH / Docker (no keyring) | `dibbla login --api-key=<t> --api-url=<url> --write-env --no-keychain` |
+| Bootstrap yaml step (agent-invoked) | `dibbla login --api-key=$DIBBLA_API_TOKEN --api-url=$DIBBLA_AUTH_SERVICE_URL --write-env --no-keychain` |
+
+### logout
+
+| Item | Details |
+|------|---------|
+| **Usage** | `dibbla logout` |
+| **Output** | Removes stored token + api_url from the OS credential store |
+
+---
+
+## run
+
+Run a `dibbla-task.yaml` pipeline locally using the dibbla-tasks steprunner.
+
+| Item | Details |
+|------|---------|
+| **Usage** | `dibbla run [path-or-url]` |
+| **Arguments** | (omitted) — runs `./dibbla-task.yaml` from the current directory |
+|  | `<local-path>` — runs the given file (work_dir defaults to the yaml's parent directory) |
+|  | `<https-url>` — fetches the yaml (5 MB max, 30 s timeout) and runs it with work_dir = your invocation CWD |
+| **Flags** | `--preview` — parse and print the execution plan without running anything |
+|  | `--env KEY=VAL` — set/override an env var for all steps (repeatable) |
+|  | `--env-file <path>` — load env vars from a `.env`-style file |
+|  | `--work-dir <dir>` — override working directory for command steps |
+|  | `--format plain\|gh` — output format (default `plain`; `gh` emits GitHub Actions workflow commands) |
+| **Env injected into steps** | `DIBBLA_API_TOKEN`, `DIBBLA_AUTH_SERVICE_URL` (both when logged in); `DIBBLA_CMD` (path to the running dibbla binary — used by bootstrap yamls for recursive invocation regardless of PATH state) |
+| **Security** | URL-fetched yamls become shell commands on the user's machine. Treat them as `curl \| bash` — only run yamls from trusted sources (e.g. `github.com/dibbla-agents/*`). |
+| **Exit code** | `0` on success; `1` on step failure or setup error |
+
+---
+
+## template
+
+Discover and install Dibbla templates from the hosted manifest.
+
+Manifest URL (default): `https://raw.githubusercontent.com/dibbla-agents/dibbla-public-templates/master/templates.json`. Override with `DIBBLA_TEMPLATES_URL` to point at a staging or local manifest.
+
+Cache lives at `~/.dibbla/templates-cache.json`. Resolution is simple: a fresh cache (fetched less than 1 h ago) is used silently; otherwise the CLI fetches the manifest from the URL and rewrites the cache. If the fetch fails (offline, 404, etc.), `dibbla template list / install` returns the error — there is no stale-cache or embedded-fallback tier. Pass `--refresh` to bypass the fresh-cache short-circuit and force a network fetch.
+
+### template list
+
+| Item | Details |
+|------|---------|
+| **Usage** | `dibbla template list` |
+| **Flags** | `--refresh` — force re-fetch of the manifest, bypassing fresh cache |
+|  | `-v`, `--verbose` — print the manifest source used (cache / network / embedded) |
+| **Output** | Table: `ID  NAME  CATEGORY  DESCRIPTION` |
+
+### template install
+
+| Item | Details |
+|------|---------|
+| **Usage** | `dibbla template install <id> [<dir>]` |
+| **Arguments** | `id` (required) — template slug from the manifest (e.g. `getting-started`, `expense-reporter`, `crm`, `presentation`) |
+|  | `dir` (optional) — destination directory; defaults to the manifest's `template_path` for that id (e.g. `./expense-reporter-template-1`) |
+| **Flags** | `--force` — overwrite (reuse) the destination directory if it already exists |
+|  | `--refresh` — force re-fetch of the manifest before installing |
+| **Behavior** | `mkdir` destination → `chdir` into it → run the template's `bootstrap_url`. The bootstrap clones the project subtree from the templates repo into CWD and recursively invokes `dibbla run ./dibbla-task.yaml` inside the cloned directory. |
+| **Refuses** | If the destination directory already exists and `--force` is not passed |
+| **Exit code** | `0` on success; `1` on any failure (manifest lookup, mkdir, bootstrap pipeline) |
+
+---
+
+## skills
+
+Install AI-coding-agent skills embedded in this CLI into a project (or the user's home dir). Skills are compiled into the binary via `//go:embed` — no network is required, and the installed skill always matches the version of `dibbla` the user has on `PATH`.
+
+Coverage: Claude Code reads `.claude/skills/<id>/SKILL.md` natively (gives a `/<id>` slash command). Cursor, Opencode, Codex, Copilot, Windsurf, Aider, Zed, Warp, and RooCode read `AGENTS.md` at project root (the 2026 open standard). Gemini CLI defaults to `GEMINI.md`, which the install also writes (same content as `AGENTS.md`) so Gemini works without editing `.gemini/settings.json`.
+
+### skills list
+
+| Item | Details |
+|------|---------|
+| **Usage** | `dibbla skills list` |
+| **Output** | Table: `ID  DESCRIPTION` — one row per skill bundled with this CLI version |
+| **Note** | The list is version-locked to the binary; upgrade the CLI to get newer skills |
+
+### skills install
+
+| Item | Details |
+|------|---------|
+| **Usage** | `dibbla skills install <id>` |
+| **Arguments** | `<id>` (required) — id from `dibbla skills list` (currently only `dibbla`) |
+| **Flags** | `--user` — install into `$HOME` instead of the current working directory |
+|  | `--force` — overwrite skill files that have been edited locally. Only the embedded filenames are touched; user-added files inside `.claude/skills/<id>/` are always preserved |
+|  | `--no-agents` — skip writing `AGENTS.md` and `GEMINI.md` at the target root (Claude Code only) |
+| **Writes** | `<root>/.claude/skills/<id>/{SKILL.md,examples.md,guardrails.md,reference.md}` |
+|  | `<root>/AGENTS.md` — marker-delimited pointer block (`<!-- >>> dibbla skill >>> -->` … `<!-- <<< dibbla skill <<< -->`). Content outside the markers is preserved byte-for-byte across reruns |
+|  | `<root>/GEMINI.md` — same block, for Gemini CLI's default context filename |
+| **Idempotent** | Re-running is safe. Identical bytes are no-ops (no mtime bump). CRLF vs LF line endings on AGENTS.md / GEMINI.md are preserved |
+| **Atomic** | Each file is written via temp-file + `rename`. No partial skill dir if the process is killed mid-install |
+| **Offline** | Yes — the skill is compiled into the binary; version always matches `dibbla --version` |
+| **Exit code** | `0` on success; `1` on conflict without `--force` or any write failure |
+
+**Canonical invocations:**
+
+| Context | Command |
+|---|---|
+| Project-local install (default) | `dibbla skills install dibbla` |
+| Machine-wide (every project sees it) | `dibbla skills install dibbla --user` |
+| Claude Code only, no AGENTS.md / GEMINI.md | `dibbla skills install dibbla --no-agents` |
+| Restore skill files after local edits | `dibbla skills install dibbla --force` |
+| Inside a `dibbla-task.yaml` bootstrap step | `dibbla skills install dibbla` (with `depends_on: ["update-dibbla"]` so the CLI is fresh enough) |
+
+---
+
 ## feedback
 
 Send, list, and manage feedback.
@@ -34,6 +164,18 @@ Send, list, and manage feedback.
 ## deploy
 
 Deploy a containerized app from a directory. App URL: `https://<alias>.dibbla.com`.
+
+### What your deploy directory needs
+
+- **A `Dockerfile` at the root.** The CLI does not auto-detect languages, doesn't run buildpacks, and doesn't generate a Dockerfile. If the Dockerfile is missing, the backend rejects the build at the build step with logs in the error. The templates in `dibbla-agents/dibbla-public-templates` all ship a working Dockerfile — copy a pattern from one when scaffolding.
+- **Whatever your Dockerfile expects** (e.g. `go.mod` + `main.go` for Go, `package.json` + source for Node, etc.). No minimum file set is enforced by the CLI.
+- **An exposed port + entrypoint in the Dockerfile.** The CLI's `--port` flag only tells the platform which container port to route to; the Dockerfile's `EXPOSE` and `CMD`/`ENTRYPOINT` are what actually bind and serve traffic.
+
+### What's excluded from the upload archive
+
+The CLI tar.gz's the deploy directory and excludes a hardcoded list: `.git/`, `node_modules/`, `.env.production`, SSH keys (`.pem`, `.key`, `*_rsa`, `*_dsa`), `.DS_Store`, etc. `.dockerignore` is not read by the CLI (but your templates can still have one — it's honored by the backend's Docker build).
+
+### Flags
 
 | Item | Details |
 |------|---------|
@@ -107,8 +249,10 @@ Deploy a containerized app from a directory. App URL: `https://<alias>.dibbla.co
 | **Usage** | `dibbla db create [name]` or `dibbla db create --name <name>` |
 | **Arguments** | `name` (optional as position) — database name |
 | **Flags** | `--name` — database name (alternative to argument) |
-| | `--deployment <alias>` — scope the database and its `DATABASE_URL` secret to a specific deployment (omit for global) |
+| | `--deployment <alias>` — scope the database and the auto-created secret to a specific deployment (omit for global) |
 | **Rule** | Name required via argument or `--name` |
+| **Name rules** | Lowercase letters, digits, and underscores only; must start with a letter; max 63 chars. Pattern: `^[a-z][a-z0-9_]{0,62}$`. Hyphens and uppercase are rejected. |
+| **Secret name** | Without `--deployment` the auto-created secret is `DATABASE_URL`. With `--deployment` it is `DATABASE_URL_<UPPERCASED_UNDERSCORED_NAME>` (e.g. `DATABASE_URL_NEXTJS_TODO_DB` for database `nextjs_todo_db`). App code must read the scoped name, not a plain `DATABASE_URL`. |
 
 ### db delete
 
@@ -143,7 +287,58 @@ Deploy a containerized app from a directory. App URL: `https://<alias>.dibbla.co
 | **Usage** | `dibbla db connect <name> [--quiet | -q]` |
 | **Arguments** | `name` (required) — database name |
 | **Flags** | `--quiet`, `-q` — print only the connection string (scripting) |
-| **Output** | psql-compatible connection string via Dibbla database proxy (`db.dibbla.com`). Uses API token as password; TLS encrypted. |
+| **Output** | psql-compatible connection string via Dibbla database proxy. Host and `sslmode` are derived from `DIBBLA_API_URL`: `api.dibbla.com` → `db.dibbla.com` (`sslmode=require`), `api.dibbla.net` → `db.dibbla.net` (`sslmode=disable`, internal), `localhost`/`127.0.0.1` → `sslmode=disable`. Override with `DIBBLA_DB_HOST`, `DIBBLA_DB_PORT`, `DIBBLA_DB_SSLMODE`. Uses API token as password. |
+
+### TLS for application database clients
+
+Dibbla's managed Postgres serves a **self-signed TLS certificate**. Every application client must either relax peer-cert verification or skip it entirely; the connection is still encrypted in transit. Server trust is enforced by network isolation — the database is only reachable from inside the deployment cluster — not by CA-rooted cert identity.
+
+The injected connection string (`DATABASE_URL` or `DATABASE_URL_<NAME>`) already carries an `sslmode` value. If your client reads `sslmode` from the URL *and* accepts explicit SSL options, the URL usually wins — a naive `ssl: { rejectUnauthorized: false }` is silently shadowed. The reliable fix is to **strip `sslmode` from the URL** before passing it to the client, then configure SSL explicitly.
+
+#### Node.js — `pg`
+
+```js
+import { Pool } from "pg";
+
+const raw =
+  process.env.DATABASE_URL ?? process.env.DATABASE_URL_MY_DB;
+
+const connectionString = raw
+  ?.replace(/([?&])sslmode=[^&]*(&|$)/gi, (_, p1, p2) => (p2 ? p1 : ""))
+  .replace(/\?$/, "");
+
+export const pool = new Pool({
+  connectionString,
+  ssl: { rejectUnauthorized: false },
+});
+```
+
+`ssl: { rejectUnauthorized: false }` alone is not enough — it is overridden by the URL's `sslmode`. Strip `sslmode` first.
+
+#### Python — `psycopg2` / `psycopg`
+
+```python
+import os
+import psycopg2
+
+conn = psycopg2.connect(
+    os.environ["DATABASE_URL"],
+    sslmode="require",   # encrypt channel
+    sslrootcert="",      # do not require CA verification
+)
+```
+
+`psycopg` v3 uses the same parameters.
+
+#### Prisma
+
+Append `?sslmode=no-verify` to the URL — a Prisma-specific extension (recent Prisma versions) that accepts self-signed certs without CA verification:
+
+```env
+DATABASE_URL="postgresql://user:pass@host:5432/db?sslmode=no-verify"
+```
+
+For older Prisma versions that don't recognise `no-verify`, use the `@prisma/adapter-pg` driver adapter and pass `ssl: { rejectUnauthorized: false }` on the underlying `pg` Pool — same pattern as the Node.js snippet above. See Prisma's self-signed-cert docs for version-specific guidance.
 
 ---
 
@@ -408,6 +603,14 @@ Alias: `fn`.
 
 | Area | Command | Purpose |
 |------|---------|---------|
+| Auth | `dibbla login [api_url]` | Interactive browser/paste login (real TTY) |
+| Auth | `dibbla login --browser` | Non-TTY browser OAuth (Claude Code, agent shells) |
+| Auth | `dibbla login --api-key <token>` | Headless token login (CI, scripted) |
+| Auth | `dibbla logout` | Clear stored credentials |
+| Run | `dibbla run [path\|url]` | Execute a dibbla-task.yaml pipeline locally |
+| Run | `dibbla run --preview <arg>` | Parse + print execution plan (no execution) |
+| Template | `dibbla template list` | List available templates from the hosted manifest |
+| Template | `dibbla template install <id> [<dir>]` | Materialize a template into a directory and run its bootstrap |
 | Feedback | `dibbla feedback <message>` | Send feedback |
 | Feedback | `dibbla feedback list` | List feedback |
 | Feedback | `dibbla feedback delete <id>` | Delete feedback |
