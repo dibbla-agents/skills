@@ -167,7 +167,7 @@ Restores a database from a dump file.
 
 #### `db connect`
 
-Prints a psql-compatible connection string for connecting to a database via the Dibbla database proxy. Host and `sslmode` are derived from `DIBBLA_API_URL`: `api.dibbla.com` → `db.dibbla.com` with `sslmode=require`; `api.dibbla.net` (internal) → `db.dibbla.net` with `sslmode=disable`; `localhost` / `127.0.0.1` also use `sslmode=disable`. Override with `DIBBLA_DB_HOST` / `DIBBLA_DB_PORT` / `DIBBLA_DB_SSLMODE`. Uses your current API token as the password.
+Prints a psql-compatible connection string for connecting to a database via the Dibbla database proxy (`db.dibbla.com`). Uses your current API token as the password; the connection is authenticated and encrypted via TLS.
 
 -   **Usage:** `dibbla db connect <name> [--quiet | -q]`
 -   **Arguments:**
@@ -234,6 +234,7 @@ The `deploy` command deploys a project to the Dibbla platform.
     -   `path` (optional): The path to the project to deploy. Defaults to the current directory.
 -   **Flags:**
     -   `--alias`, `-a`: Custom alias name (default: directory name).
+    -   `--message`, `-m`: **Required for agents.** Deploy message used as the VCS commit subject in the app's Dibbla-managed git history (and on the GitHub mirror, if configured). Treat it like a git commit subject: present-tense imperative, under ~72 chars, covering what changed and why. Max 500 chars. Examples: `-m "fix: handle null org in /api/me"`, `-m "feat: add nightly db backup workflow"`, `-m "chore: bump node to 20.14"`. For retries/mechanical redeploys still say so: `-m "redeploy: retry after CF 524"`. Never omit `-m` — a blank deploy history is a bug, not a default.
     -   `--force`, `-f`: Force a redeployment if an application with the same alias already exists (causes downtime).
     -   `--update`, `-u`: Rolling update of existing deployment (zero downtime). Mutually exclusive with `--force`.
     -   `--env`, `-e`: Set environment variable KEY=value (repeatable, Docker-style).
@@ -241,37 +242,31 @@ The `deploy` command deploys a project to the Dibbla platform.
     -   `--memory <value>`: Memory request (e.g. `512Mi`).
     -   `--port <value>`: Container port (e.g. `3000`).
     -   `--favicon <url>`: Favicon URL (e.g. `https://example.com/favicon.ico`).
--   **Example:** `dibbla deploy ./my-app --force` — **Rolling update:** `dibbla deploy --update` — **With options:** `dibbla deploy --cpu 500m --memory 512Mi --port 3000 -e NODE_ENV=production -e LOG_LEVEL=info`
+-   **Example:** `dibbla deploy ./my-app -m "feat: initial deploy" --force` — **Rolling update:** `dibbla deploy -m "fix: resolve 500 on /search" --update` — **With options:** `dibbla deploy -m "feat: add healthcheck" --cpu 500m --memory 512Mi --port 3000 -e NODE_ENV=production -e LOG_LEVEL=info`
 
-### `skills`
+### `clone`
 
-The `skills` command installs the skill files that teach AI coding agents (Claude Code, Cursor, Gemini CLI, Opencode, Codex, Copilot, Windsurf, Aider, etc.) how to use the Dibbla CLI. The skill content is embedded in the binary via `//go:embed`, so no network is required and the skill version is always locked to the CLI version.
+Clones the Dibbla-managed git repo for a deployed app. Each `dibbla deploy` writes a commit to a platform-managed bare repo; `clone` lets you fetch that history locally so you (or a coding agent) can inspect exactly what was deployed, diff between deploys, or fork the code back to GitHub/GitLab.
 
-#### `skills list`
-
-Lists skills bundled with this `dibbla` version.
-
--   **Usage:** `dibbla skills list`
--   **Output:** A table with skill id and description (currently just `dibbla`).
--   **Example:** `dibbla skills list`
-
-#### `skills install`
-
-Writes the skill files into the current project (or `$HOME` with `--user`) plus `AGENTS.md` / `GEMINI.md` pointer blocks so other coding agents pick it up.
-
--   **Usage:** `dibbla skills install <id>`
+-   **Usage:** `dibbla clone <app>` or `dibbla clone <org>/<app>`
 -   **Arguments:**
-    -   `id` (required): Skill id from `dibbla skills list` (currently only `dibbla`).
+    -   `app` (required): The app alias. The `<org>/` prefix is accepted but optional — the org is derived from your token.
 -   **Flags:**
-    -   `--user`: Install into `$HOME` instead of the current working directory (machine-wide coverage).
-    -   `--force`: Overwrite skill files that have been edited locally. Only the embedded filenames are touched; user-added files in `.claude/skills/<id>/` are always preserved.
-    -   `--no-agents`: Skip writing `AGENTS.md` and `GEMINI.md` at the target root (Claude Code only).
--   **Writes:**
-    -   `<root>/.claude/skills/<id>/{SKILL.md,examples.md,guardrails.md,reference.md}` — Claude Code's native skill path.
-    -   `<root>/AGENTS.md` — marker-delimited pointer block (2026 open standard; read by Cursor, Opencode, Codex, Copilot, Windsurf, Aider, Zed, Warp, RooCode).
-    -   `<root>/GEMINI.md` — same block, for Gemini CLI's default context filename.
--   **Idempotent:** Re-running is safe. Identical bytes are a no-op (no mtime bump). CRLF vs LF line endings in `AGENTS.md` / `GEMINI.md` are preserved.
--   **Example:** `dibbla skills install dibbla` — **Machine-wide:** `dibbla skills install dibbla --user` — **Claude Code only:** `dibbla skills install dibbla --no-agents`
+    -   `--ref <sha>`: Commit SHA to check out after clone (default: latest on `main`).
+    -   `--into <dir>`: Destination directory (default: `./<app>`).
+-   **Authentication:** Reuses the token from `dibbla login` / `DIBBLA_API_TOKEN` — no separate clone credential. Internally the CLI shells out to `git -c http.extraHeader="Authorization: Bearer <token>" clone ...`, so the token never lands in `~/.git-credentials` or `.git/config`.
+-   **Push is rejected.** The platform rejects `git push` by design — these repos are append-only from deploys. If you want to share changes, add a GitHub/GitLab remote locally and push there.
+-   **Example:** `dibbla clone my-app` — **Pin commit:** `dibbla clone my-app --ref abc1234` — **Custom dir:** `dibbla clone my-app --into ./checkout`
+
+### Version control API (for scripting / agents)
+
+Three read-only endpoints expose the same data surfaced by the console's Version Control card. Authenticate with `Authorization: Bearer $DIBBLA_API_TOKEN`.
+
+-   `GET /api/deploy/deployments/<app>/vcs/info` — returns default branch, latest commit, clone URL, CLI command, and `running_sha` when the latest commit matches the Running deployment.
+-   `GET /api/deploy/deployments/<app>/vcs/commits?limit=<n>&before=<sha>` — paginated commit list (newest first). The `deploy_id` field (from the `Deploy-Id:` trailer) correlates commits with deployments.
+-   `GET /api/deploy/deployments/<app>/vcs/commits/<sha>` — commit detail with the file list at that tree.
+
+Prefer `dibbla clone` over shelling out to `git clone` by hand — it resolves the canonical clone URL via `/vcs/info`, so it keeps working if the git host moves.
 
 ## Pre-deploy guardrails
 

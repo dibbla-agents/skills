@@ -4,157 +4,6 @@ Copy-paste examples for common workflows. For full usage and flags see [referenc
 
 ---
 
-## Installing dibbla
-
-```bash
-# macOS — Homebrew
-brew install dibbla-agents/tap/dibbla
-
-# macOS / Linux — shell installer (drops binary into ~/.local/bin)
-curl -fsSL https://install.dibbla.com/install.sh | sh
-
-# Windows — PowerShell
-powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://install.dibbla.com/install.ps1 | iex"
-
-# Verify
-dibbla --version
-
-# Upgrade (same command as install — replaces in place)
-curl -fsSL https://install.dibbla.com/install.sh | sh
-# …or on macOS Homebrew:
-brew upgrade dibbla
-```
-
----
-
-## Login (including Claude Code / agentic tools)
-
-```bash
-# Interactive (real TTY — picks between browser OAuth and paste-token)
-dibbla login api.dibbla.net
-
-# From inside Claude Code's `!` prefix, an agent shell, or any non-TTY context
-! dibbla login --browser api.dibbla.net
-# Opens your default browser via localhost callback. No stdin needed.
-
-# Headless (no browser available — CI, SSH, containers)
-dibbla login api.dibbla.net --api-key ak_...
-# or:
-export DIBBLA_API_TOKEN=ak_...
-export DIBBLA_API_URL=https://api.dibbla.net
-dibbla deploy .          # reads env vars directly; no login needed
-
-# Cloud VM / SSH / Docker (no keyring service installed)
-# Validates the token, writes credentials to ./.env, patches .gitignore,
-# does NOT touch the OS keyring (libsecret/gnome-keyring/pass may not exist).
-# Requires CLI >= v1.2.4.
-dibbla login --api-key=ak_... --api-url=https://api.dibbla.net --write-env --no-keychain
-
-# Afterwards, every dibbla command in that directory reads credentials from .env:
-dibbla deploy .
-dibbla apps list
-
-# Log out (clears keyring)
-dibbla logout
-```
-
----
-
-## Running task files locally
-
-```bash
-# Run ./dibbla-task.yaml in the current directory
-dibbla run
-
-# Run a specific local task file
-dibbla run ./setup/dibbla-task.yaml
-
-# Preview (parse + print plan, do not execute)
-dibbla run --preview ./dibbla-task.yaml
-
-# Run a bootstrap yaml from GitHub — clones into your CWD and runs setup
-mkdir my-project && cd my-project
-dibbla run https://raw.githubusercontent.com/dibbla-agents/dibbla-public-templates/master/getting-started.dibbla-task.yaml
-
-# Override env vars and working directory
-dibbla run --env PORT=3000 --env-file .env.local --work-dir ./build ./dibbla-task.yaml
-
-# Switch output format for CI / GitHub Actions
-dibbla run --format gh ./dibbla-task.yaml
-```
-
----
-
-## Discovering and installing templates
-
-```bash
-# See what's available
-dibbla template list
-
-# Force re-fetch + show manifest source (cache / network / embedded)
-dibbla template list --refresh -v
-
-# Install a template into its default-named directory
-dibbla template install expense-reporter
-# → creates ./expense-reporter-template-1 and runs the bootstrap pipeline
-
-# Install a template into a custom directory
-dibbla template install getting-started my-starter-app
-
-# Reuse an existing destination directory
-dibbla template install crm --force
-```
-
----
-
-## Skills (teach AI coding agents about the CLI)
-
-Install the bundled `dibbla` skill so every coding agent in the project reads it automatically. The skill content is embedded in the CLI binary — no network needed, and the skill version is locked to your installed `dibbla` version.
-
-```bash
-# see what skills are bundled (one for now: 'dibbla')
-dibbla skills list
-
-# install into the current project
-dibbla skills install dibbla
-# → writes .claude/skills/dibbla/{SKILL.md,examples.md,guardrails.md,reference.md}
-#   and an AGENTS.md + GEMINI.md pointer block at the project root
-
-# install into $HOME once so every project picks up the skill
-dibbla skills install dibbla --user
-
-# Claude Code only (skip AGENTS.md and GEMINI.md)
-dibbla skills install dibbla --no-agents
-
-# re-run is a clean no-op if nothing changed;
-# use --force to restore skill files that were edited locally
-dibbla skills install dibbla --force
-```
-
-**What each output does:**
-
-| File | Used by |
-|------|---------|
-| `.claude/skills/dibbla/SKILL.md` | Claude Code (native skill format, gives `/dibbla` slash command) |
-| `AGENTS.md` | Cursor, Opencode, Codex, Copilot, Windsurf, Aider, Zed, Warp, RooCode (AGENTS.md open standard) |
-| `GEMINI.md` | Gemini CLI (its default context filename) |
-
-`AGENTS.md` and `GEMINI.md` use a marker-delimited block (`<!-- >>> dibbla skill >>> -->` … `<!-- <<< dibbla skill <<< -->`). Running `dibbla skills install dibbla` again replaces only that block — any other content you've added to those files is preserved byte-for-byte.
-
-**Inside a `dibbla-task.yaml` bootstrap step:**
-
-```yaml
-- id: install-skills
-  name: "Install Dibbla Skill"
-  type: command
-  run: "dibbla skills install dibbla"
-  depends_on: ["update-dibbla"]
-```
-
-The `depends_on: ["update-dibbla"]` ensures the CLI is fresh enough to have the `skills` command before this step runs.
-
----
-
 ## Feedback
 
 ```bash
@@ -190,19 +39,6 @@ dibbla deploy --alias my-app --require-login
 dibbla deploy --alias my-app --require-login --access-policy invite_only
 dibbla deploy --alias my-app --require-login --google-scopes https://www.googleapis.com/auth/drive.readonly
 ```
-
-### Deploy troubleshooting
-
-#### Cloudflare 524 / "timeout occurred" during deploy
-
-`dibbla deploy` holds a single HTTP connection to the backend while the container image is built. Builds that take longer than ~100 seconds (common for Next.js, Rails, or large monorepos) may return a Cloudflare 524 on the client side **even though the backend build is still running and often succeeds.** A 524 is not necessarily a failure.
-
-Recovery:
-
-1. Wait 2–5 minutes for the backend build to finish.
-2. Run `dibbla apps list` and look for the alias.
-3. If it appears with `running` status, the deploy succeeded — you are done.
-4. If the alias does not appear after ~10 minutes, retry with `dibbla deploy --update` (rolling, zero downtime if the previous attempt did quietly succeed). Avoid `--force`, which causes downtime if the deploy actually worked.
 
 ---
 
@@ -465,17 +301,6 @@ dibbla deploy . --alias my-app --update
 ### Deploy a new app (first time)
 
 ```bash
-# 0. The directory must contain a Dockerfile — dibbla does NOT autodetect
-#    languages or run buildpacks. Minimal example:
-#
-#    FROM node:20-alpine AS build
-#    WORKDIR /app
-#    COPY package*.json ./
-#    RUN npm ci --omit=dev
-#    COPY . .
-#    EXPOSE 3000
-#    CMD ["node", "server.js"]
-#
 # 1. Check if the app already exists
 dibbla apps list
 
@@ -516,11 +341,8 @@ fi
 ### Full setup: app + database + secrets
 
 ```bash
-# 1. Create the database (scoped to the deployment).
-#    When --deployment is set, the auto-created secret is named
-#    DATABASE_URL_<UPPERCASED_NAME>, e.g. DATABASE_URL_MY_APP_DB here.
-#    Without --deployment it is named DATABASE_URL.
-dibbla db create my_app_db --deployment my-app
+# 1. Create the database (scoped to the deployment — auto-creates DATABASE_URL secret)
+dibbla db create my-app-db --deployment my-app
 
 # 2. Set additional secrets
 dibbla secrets set API_KEY "sk-xxx"
@@ -545,37 +367,4 @@ export DATABASE_URL=$(dibbla db connect my-app-db -q)
 dibbla apps delete my-app --yes
 dibbla db delete my-app-db --yes
 dibbla secrets delete API_KEY --yes
-```
-
-### Install a template and start iterating
-
-```bash
-# 1. Show available templates to the user
-dibbla template list
-
-# 2. Install the one they picked (default destination — ./<template_path>)
-dibbla template install expense-reporter
-
-# 3. The bootstrap yaml does the rest automatically:
-#    - tool checks (git, node, go, dibbla)
-#    - dibbla self-update (auto-installs latest dibbla)
-#    - clones the template project into CWD
-#    - dibbla login via env-var (DIBBLA_AUTH_SERVICE_URL picked up from parent)
-#    - npm install, go build, start dev servers (ports per template)
-#    - opens the app in the default browser
-#
-#    End state: a live local project the user can edit.
-
-# 4. Iteration: re-run the inner dibbla-task.yaml any time
-cd expense-reporter-template-1
-dibbla run
-# idempotent — existing installs skip, stale dev servers are reclaimed
-```
-
-### Run a bootstrap yaml directly (without dibbla template install)
-
-```bash
-# Same end state, one command:
-mkdir my-app && cd my-app
-dibbla run https://raw.githubusercontent.com/dibbla-agents/dibbla-public-templates/master/getting-started.dibbla-task.yaml
 ```
