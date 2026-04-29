@@ -1,6 +1,6 @@
 ---
 name: dibbla
-description: Use the Dibbla CLI to scaffold projects, run dibbla-task.yaml pipelines locally (dibbla run), discover and install project templates (dibbla template list/install), install this skill into any project so other AI coding agents read it too (dibbla skills install dibbla), deploy apps, and manage applications, databases, secrets, and workflows on the Dibbla platform. Use when the user wants to run a local task file or a template from a URL, install a starter template, install the dibbla skill into a project or home dir for use with Claude Code/Cursor/Gemini CLI/Opencode/Codex, log in (including from non-TTY contexts like Claude Code via `dibbla login --browser`), deploy, list/update/delete apps, create/list/delete/dump/restore databases, manage secrets, or manage workflows (create/execute/validate workflows, manage nodes/edges/inputs/tools, revisions, and browse functions).
+description: Use the Dibbla CLI to scaffold projects, run dibbla-task.yaml pipelines locally (dibbla run), discover and install project templates (dibbla template list/install), install this skill into any project so other AI coding agents read it too (dibbla skills install dibbla), deploy apps, view per-app logs (dibbla logs), and manage applications, databases, secrets, and workflows on the Dibbla platform. Use when the user wants to run a local task file or a template from a URL, install a starter template, install the dibbla skill into a project or home dir for use with Claude Code/Cursor/Gemini CLI/Opencode/Codex, log in (including from non-TTY contexts like Claude Code via `dibbla login --browser`), deploy, list/update/delete apps, fetch or follow logs for a deployed app, create/list/delete/dump/restore databases, manage secrets, or manage workflows (create/execute/validate workflows, manage nodes/edges/inputs/tools, revisions, and browse functions).
 ---
 
 # Dibbla CLI
@@ -33,6 +33,7 @@ The shell installer drops the binary into `~/.local/bin` and adjusts `PATH` if n
 | Feedback   | `feedback <message>`, `feedback list`, `feedback delete <id>` |
 | Deploy     | `deploy [path] -m "<msg>" [--alias name] [--update] [--require-login] [--access-policy] [--google-scopes]` — deploy from directory; `-m` becomes the VCS commit subject |
 | Apps       | `apps list`, `apps update <alias>`, `apps delete <alias>` |
+| Logs       | `logs <app>`, `logs <app> --since 24h`, `logs <app> -f`, `logs <app> -n 200`, `logs <app> --grep <re>`, `logs <app> --json` |
 | Db         | `db list`, `db create`, `db delete`, `db dump`, `db restore`, `db connect` |
 | Secrets    | `secrets list`, `secrets set`, `secrets get`, `secrets delete` (global or `-d <alias>`) |
 | Workflows  | `workflows list`, `get`, `create`, `update`, `delete`, `validate`, `execute`, `url`, `api-docs` |

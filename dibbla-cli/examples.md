@@ -231,6 +231,35 @@ dibbla apps delete my-old-app -y
 
 ---
 
+## Logs
+
+```bash
+dibbla logs expense-reporter                            # Last 15 min, then exit
+dibbla logs expense-reporter --since 24h                # Last 24 hours
+dibbla logs expense-reporter --since 1h30m              # Arbitrary Go duration
+dibbla logs expense-reporter -f                         # Follow new lines (only)
+dibbla logs expense-reporter --since 10m -f             # Backfill 10 min, then follow
+dibbla logs expense-reporter -n 200                     # Last 200 lines
+dibbla logs expense-reporter --grep "timeout"           # Regex line filter (server-side)
+dibbla logs expense-reporter --grep "(?i)error"         # Case-insensitive regex
+dibbla logs expense-reporter --limit 5000               # Cap range-mode line count
+dibbla logs expense-reporter --json                     # Raw NDJSON
+dibbla logs expense-reporter --json | jq -r '.line'     # Stream just the message body
+dibbla logs expense-reporter --json --since 24h | jq 'select(.line|test("ERROR"))'
+
+# Pipe-friendly: --no-color is auto when stdout isn't a TTY
+dibbla logs expense-reporter --since 1h > app.log
+```
+
+**Tips:**
+- `--since` is a Go duration: `30s`, `10m`, `1h`, `1h30m`, `24h`. Server caps it at 24h.
+- `-f` alone follows from "now"; combine with `--since 10m` if you want a few minutes of backfill before the live tail.
+- `-n` (kubectl `--tail`) replaces the `--since` window — use one or the other.
+- `--grep` runs server-side, so it works on huge windows without paying for line transfer.
+- `--json` emits one Loki entry (`ts`, `line`, `labels`) per row — pipe to `jq`.
+
+---
+
 ## Db
 
 ```bash

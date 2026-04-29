@@ -277,6 +277,28 @@ fixtures/*.bin
 
 ---
 
+## logs
+
+Print logs for a deployed app. Sourced from the platform's Loki backend; results are scoped to apps in the caller's organization (a 404 is returned otherwise).
+
+| Item | Details |
+|------|---------|
+| **Usage** | `dibbla logs <app>` |
+| **Arguments** | `app` (required) — deployment alias |
+| **Default** | Returns the last 15 minutes of logs and exits |
+| **Flags** | `--since <duration>` — fetch window (Go duration; default `15m`, server cap `24h`) |
+| | `-f`, `--follow` — stream new lines as they arrive (after any backfill) |
+| | `-n`, `--tail <N>` — return last N lines instead of the `--since` window |
+| | `--grep <regex>` — server-side regex line filter (LogQL `\|~`) |
+| | `--limit <N>` — cap lines fetched in range mode (server caps the value) |
+| | `--json` — emit raw NDJSON (one Loki entry per line) for tooling |
+| | `--no-color` — disable color (auto-disabled when stdout isn't a TTY) |
+| **Output (default)** | `HH:MM:SS.mmm  LEVEL  message` — level extracted from slog-shaped JSON lines; non-JSON lines are printed raw |
+| **Output (`--json`)** | One NDJSON object per line: `{"ts":"…","line":"…","labels":{…}}` |
+| **Errors** | `404` — app not in your org · `503` — platform logs not configured (server `LOKI_URL` unset) |
+
+---
+
 ## db
 
 ### db list
