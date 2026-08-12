@@ -11,7 +11,7 @@ Authenticate with the Dibbla API and store the token in the OS credential store.
 | Item | Details |
 |------|---------|
 | **Usage** | `dibbla login [api_url]` |
-| **Arguments** | `api_url` (optional) — API endpoint (e.g. `api.dibbla.net` or `https://api.dibbla.net`). If omitted, the URL resolves in this order: `$DIBBLA_API_URL` → `$DIBBLA_AUTH_SERVICE_URL` → default `https://api.dibbla.com`. Both env names are read from `./.env` (CWD) as well as the shell environment. |
+| **Arguments** | `api_url` (optional) — API endpoint (e.g. `api.your-domain.com` or `https://api.your-domain.com`). If omitted, the URL resolves in this order: `$DIBBLA_API_URL` → `$DIBBLA_AUTH_SERVICE_URL` → default `https://api.dibbla.com`. Both env names are read from `./.env` (CWD) as well as the shell environment. |
 | **Flags** | `--browser` — skip the interactive menu; go directly to browser OAuth. Works in non-TTY contexts (Claude Code `!` prefix, agent shells) because the flow uses a localhost callback, not stdin. |
 |  | `--api-key <token>` — pass a pre-generated token; works in any context |
 |  | `--api-url <url>` — explicit API endpoint URL (alternative to the positional arg; **mutually exclusive** with it — specifying both is an error). Useful in long command lines like yaml steps where positional args are easy to miss. |
@@ -282,6 +282,7 @@ fixtures/*.bin
 || | `--force`, `-f` — force redeploy if alias exists (causes downtime) |
 | | `--update`, `-u` — rolling update of existing deployment (zero downtime) |
 | | `--env`, `-e` — env var `KEY=value` (repeatable) |
+| | `--env-file <path>` — bulk-load env vars from a `.env`-style file. The file is the base layer; `-e` flags override individual keys (file < `-e`, same precedence as `dibbla run`). Keep the file **outside** the deploy directory (a `.env` in the deploy root is a guardrail blocker). |
 | | `--cpu` — CPU request (e.g. `500m`) |
 | | `--memory` — Memory request (e.g. `512Mi`) |
 | | `--port` — Container port (e.g. `3000`) |
@@ -404,6 +405,7 @@ dibbla preview --json | jq '.active_services'
 | **Usage** | `dibbla apps update <alias>` |
 | **Arguments** | `alias` (required) — deployment alias |
 | **Flags** | `--env`, `-e` — env var `KEY=value` (repeatable) |
+| | `--env-file <path>` — bulk-load env vars from a `.env`-style file (base layer; `-e` overrides individual keys, file < `-e`) |
 | | `--replicas` — desired replica count |
 | | `--cpu` — CPU request/limit (e.g. `500m`, `1`) |
 | | `--memory` — Memory request/limit (e.g. `256Mi`, `512Mi`) |
@@ -412,7 +414,7 @@ dibbla preview --json | jq '.active_services'
 | | `--require-login` — Require login: `true` or `false` |
 | | `--access-policy` — Access policy: `all_members`, `invite_only`, or `""` to clear |
 | | `--google-scopes` — Google OAuth scope URL (repeatable, use `""` to clear) |
-| **Rule** | At least one of: `--env`, `--replicas`, `--cpu`, `--memory`, `--port`, `--favicon`, `--require-login`, `--access-policy`, `--google-scopes` required |
+| **Rule** | At least one of: `--env`, `--env-file`, `--replicas`, `--cpu`, `--memory`, `--port`, `--favicon`, `--require-login`, `--access-policy`, `--google-scopes` required |
 
 ### apps delete
 
@@ -555,7 +557,7 @@ dibbla logs expense-reporter --service worker -f     # narrow to one service aft
 | **Usage** | `dibbla db connect <name> [--quiet | -q]` |
 | **Arguments** | `name` (required) — database name |
 | **Flags** | `--quiet`, `-q` — print only the connection string (scripting) |
-| **Output** | psql-compatible connection string via the Dibbla database proxy, authenticated with your **personal API token** as the password (for human/CLI use). Apps don't use this — they read the auto-injected `DATABASE_URL_<NAME>` secret, which goes through the same proxy but with a managed per-database proxy secret. Host and `sslmode` are derived from `DIBBLA_API_URL`: `api.dibbla.com` → `db.dibbla.com` (`sslmode=require`), `api.dibbla.net` → `db.dibbla.net` (`sslmode=disable`, internal), `localhost`/`127.0.0.1` → `sslmode=disable`. Override with `DIBBLA_DB_HOST`, `DIBBLA_DB_PORT`, `DIBBLA_DB_SSLMODE`. |
+| **Output** | psql-compatible connection string via the Dibbla database proxy, authenticated with your **personal API token** as the password (for human/CLI use). Apps don't use this — they read the auto-injected `DATABASE_URL_<NAME>` secret, which goes through the same proxy but with a managed per-database proxy secret. Host and `sslmode` are derived from `DIBBLA_API_URL`: the `api.` host maps to the matching `db.` host on the same base domain, so `api.dibbla.com` → `db.dibbla.com` (`sslmode=require`). `localhost`/`127.0.0.1` map to `sslmode=disable`. Override any of it with `DIBBLA_DB_HOST`, `DIBBLA_DB_PORT`, `DIBBLA_DB_SSLMODE`. |
 
 ### TLS for application database clients
 
@@ -635,6 +637,48 @@ Precedence at deploy time (highest wins): per-service > deployment-wide > global
 | **Flags** | `--deployment`, `-d` — attach to deployment; omit for global |
 | | `--service`, `-s` — scope to a single service (requires `-d`) |
 | **Notes** | Per-service secrets stack on top of deployment-wide and global; the higher-precedence value wins inside the service container. |
+
+### secrets import
+
+| Item | Details |
+|------|---------|
+| **Usage** | `dibbla secrets import <file> [-e KEY=value ...] [-d <alias>] [-s <service>] [--dry-run]` |
+| **Arguments** | `file` (required) — a `.env`-style file |
+| **Flags** | `--env`, `-e` — override a single `KEY=value` on top of the file (repeatable; file < `-e`) |
+| | `--deployment`, `-d` — import into a deployment; omit for global |
+| | `--service`, `-s` — scope to a single service (requires `-d`) |
+| | `--dry-run` — list the keys that would be set (names + scope only, no values, no network) |
+| **Behaviour** | Bulk-loads every `KEY=value` into the secrets store **without a redeploy**. Every key is validated up front against `^[a-zA-Z][a-zA-Z0-9_]{0,127}$`; if any is invalid, nothing is sent. The server upserts, so import is idempotent and re-runnable. On a mid-loop API error it stops and reports how many succeeded and which key failed. **Values are never printed** — output is key names + a count. |
+| **Notes** | Keep the `.env` file **outside** the deploy directory (or in `.dibblaignore`): a `.env` in the deploy root is a pre-deploy guardrail blocker, stripped from VCS. |
+
+### `.env` file grammar (`--env-file`, `secrets import`)
+
+Files are parsed by `godotenv`, the same parser `dibbla run --env-file` uses.
+The accepted grammar, exactly:
+
+| Form | Result |
+|---|---|
+| `KEY=value` | the basic form |
+| `export KEY=value` | accepted; `export ` is ignored |
+| `# comment` | whole-line comments are skipped |
+| `KEY=value # trailing` | trailing comments are stripped → `value` |
+| blank lines | skipped |
+| `KEY=` | empty string, not "unset" |
+| `KEY=a=b=c` | split on the **first** `=` → `a=b=c` |
+| `KEY="has spaces"` | quotes are stripped |
+| `KEY="line1\nline2"` | double-quoted values may span lines |
+| `KEY="pre ${OTHER} post"` | **`${VAR}` is expanded** inside double quotes |
+| `KEY='no ${EXPANSION}'` | single quotes are **literal** — nothing expands |
+
+Two things that bite:
+
+- **A `$` in a double-quoted value is expansion syntax, not a literal.** A
+  password like `"p$assw0rd"` loses `$assw0rd` (an undefined variable expands to
+  empty). Single-quote values that contain `$`: `KEY='p$assw0rd'`.
+- **A `-` in a *name* is a parse error**, not an invalid-name error: godotenv
+  fails the whole file with `unexpected character "-" in variable name`. Names
+  that parse but break the secret rule (leading digit, `.`, space, leading `_`)
+  are caught by `secrets import`'s own up-front validation instead.
 
 ### secrets get
 
@@ -1027,6 +1071,7 @@ Alias: `fn`.
 | Db | `dibbla db connect <name> [-q]` | Print connection string |
 | Secrets | `dibbla secrets list [-d alias]` | List global or app secrets |
 | Secrets | `dibbla secrets set <name> [value] [-d alias]` | Create/update secret |
+| Secrets | `dibbla secrets import <file> [-d alias] [--dry-run]` | Bulk-load a `.env` file into secrets (no redeploy) |
 | Secrets | `dibbla secrets get <name> [-d alias]` | Print secret value |
 | Secrets | `dibbla secrets delete <name> [-d alias]` | Delete secret |
 | Workflows | `dibbla workflows list` | List all workflows |
