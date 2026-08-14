@@ -74,7 +74,7 @@ All options are functional; pass any subset to `sdk.New`. Each option also has a
 | Option | Env var | Default | Notes |
 |---|---|---|---|
 | `WithServerName(name)` | `SERVER_NAME` | `codex-go-worker` | Unique per worker. Functions are keyed by `(server_name, function_name)`. |
-| `WithServerApiToken(t)` | `SERVER_API_TOKEN` | _(empty)_ | A **personal API token (`ak_…`)** from the Dibbla console — **not** the internal `WORKFLOW_SERVER_API_TOKEN`. **Only needed for local dev**: workers deployed on the platform authenticate via workload identity with no token (sdk-go ≥ v0.0.18). See §8. |
+| `WithServerApiToken(t)` | `SERVER_API_TOKEN` | _(empty)_ | A **personal API token (`ak_…`)** from the Dibbla console — **not** the internal `WORKFLOW_SERVER_API_TOKEN`. Required against production. See §8. |
 | `WithOrgID(id)` | `SERVER_ORG_ID` | _(token's default org)_ | Pin registration to a specific org when the token owner belongs to several. The owner must be a member. |
 | `WithGrpcServerAddress(a)` | `GRPC_SERVER_ADDRESS` | `grpc.dibbla.com:443` | `grpc.<domain>:443` on self-hosted clusters; `localhost:50051` for local dev. |
 | `WithGrpcTLS(bool)` | `GRPC_USE_TLS` (`true`/`false`/`1`) | _auto-detect_ | Auto-on for `*.dibbla.com`, auto-off for `localhost`/`127.0.0.1`/`[::1]`. |
@@ -234,22 +234,16 @@ ctx.Logger.WithWriter(myBuf) // redirect console output (gRPC stream is unaffect
 
 ## 8. Authentication, endpoint & TLS
 
-The gRPC endpoint is **auth-proxied**: on connect, your credential is validated against the central auth service, and the functions you register are **scoped to your organization**.
+The gRPC endpoint is **auth-proxied**: on connect, your `SERVER_API_TOKEN` is validated against the central auth service, and the functions you register are **scoped to that token's organization**.
 
-**Deployed on the Dibbla platform (`dibbla deploy`): no token needed — at all.** Since sdk-go **v0.0.18**, the platform mints a *workload identity* for every deployment (a projected, auto-rotating Kubernetes token at `/var/run/secrets/dibbla/identity/token`, pointed to by `DIBBLA_IDENTITY_TOKEN_FILE`) and the SDK picks it up automatically. The worker authenticates as its **tenant + deployment**; there is no credential to provision, store, rotate, or expire. Do not set `API_KEY`/`SERVER_API_TOKEN` for platform-deployed workers — leaving it unset is the correct configuration.
-
-**Local development (or any machine outside the platform): set `SERVER_API_TOKEN`** to a personal API token (`ak_…`) created in the Dibbla console. An explicit API token always wins over the workload identity, so it also works as a deliberate override in-cluster.
-
-**Never use the platform-internal `WORKFLOW_SERVER_API_TOKEN`** — that's a shared service token for in-cluster system workers; it won't scope your functions to your org and is not for user-built workers.
+**The token must be a personal API token (`ak_…`) created in the Dibbla console.** Do **not** use the platform-internal `WORKFLOW_SERVER_API_TOKEN` — that's a shared service token for in-cluster system workers; it won't scope your functions to your org and is not for user-built workers.
 
 ```go
 server, _ := sdk.New(
     sdk.WithServerName("my-worker"),
-    sdk.WithServerApiToken(os.Getenv("SERVER_API_TOKEN")), // empty on the platform = workload identity; ak_… locally
+    sdk.WithServerApiToken(os.Getenv("SERVER_API_TOKEN")), // ak_… from the console
 )
 ```
-
-Credential precedence: `WithServerApiToken` / `SERVER_API_TOKEN` → workload identity token file (`DIBBLA_IDENTITY_TOKEN_FILE`, then the default mount) → none (warning; connection rejected). The identity file is re-read at every (re)connect, so token rotation needs no handling in your code.
 
 **Endpoint** (`GRPC_SERVER_ADDRESS`):
 
