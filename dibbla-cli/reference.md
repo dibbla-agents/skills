@@ -55,7 +55,7 @@ organization: the one the console opens on.
 | **Usage** | `dibbla org` or `dibbla org list` — list the organizations you belong to, marking the active one |
 | | `dibbla org use <name\|slug\|id>` — act as that organization from now on |
 | | `dibbla org clear` — go back to your account's default |
-| **Flags** | `--json` (on `list`) — emit machine-readable JSON; each entry carries `active` |
+| **Flags** | `--json` (on `list`) — emit machine-readable JSON; each entry carries `active`, and `plan` when the org has one (installs without billing omit it) |
 | | `--org <id>` — global flag on *every* command; applies to that one invocation only |
 | **Resolution order** | `--org` > `DIBBLA_ORG_ID` > stored selection (keyring, then `~/.config/dibbla/credentials.env`) > account default |
 | **Storage** | `org use` writes to the OS keyring, falling back to the user-level credentials file on hosts without one — the same two-tier scheme `login` uses. The selection is machine-wide and survives `cd`. |
@@ -110,8 +110,13 @@ Dibbla CLI 1.2.24
 API:     https://api.dibbla.com  (default)
 Token:   configured  (source: keyring)
 Org:     Acme (a1b2c3d4-...) (keyring, source: keyring)
+Plan:    standard
 Status:  ✅ logged in
 ```
+
+The `Plan` line appears only when the validated organization has a plan
+(P-0027); trials read `Plan:    trial (ends 2026-09-21T00:00:00Z)`. Under
+`--no-validate` no network call is made, so no plan is shown.
 
 The `Org` line reads `account default (none selected)` when no organization has
 been selected — see [org](#org).
@@ -129,11 +134,14 @@ been selected — see [org](#org).
   "org_name": "Acme",
   "org_source": "keyring",
   "validated": true,
-  "logged_in": true
+  "logged_in": true,
+  "plan": "standard"
 }
 ```
 
 `validation_error` is added when a token was rejected; omitted otherwise.
+`plan` and `trial_ends_at` are present only when validation ran and the
+organization has a plan.
 `org_id` / `org_name` are omitted when no organization is selected, in which
 case `org_source` reads `none (account default)`. `org_name` is also absent
 when the organization came from `--org` or `DIBBLA_ORG_ID`, which carry an id
@@ -304,11 +312,15 @@ Deploy a containerized app from a directory. App URL: `https://<alias>.dibbla.co
 
 ### What's excluded from the upload archive
 
-The CLI tar.gz's the deploy directory and excludes a hardcoded list: `.git/`, `node_modules/`, `.env.production`, SSH keys (`.pem`, `.key`, `*_rsa`, `*_dsa`), `.DS_Store`, etc. `.dockerignore` is not read by the CLI (but your templates can still have one — it's honored by the backend's Docker build).
+The CLI tar.gz's the deploy directory and excludes a hardcoded list, matched on the **basename at any depth**: `.git`, `node_modules`, `.env.production`, `.env.prod`, `credentials.json`, `service-account.json`, and the four SSH private keys by **exact name** — `id_rsa`, `id_ed25519`, `id_ecdsa`, `id_dsa` (these are exact basenames, not `*_rsa`-style globs). By extension it also drops `.pem`, `.key`, `.exe`, `.dll`, `.so`, `.dylib`, `.bat`, `.cmd`, `.com`, `.msi`, `.scr`, `.pif`. `.DS_Store` is **not** on either list. `.dockerignore` is not read by the CLI (but your templates can still have one — it's honored by the backend's Docker build).
+
+This is only the first of three filters. See "Build-context strip (`skippedDirs`)" below for the one that decides what your `Dockerfile` can actually `COPY`.
 
 ### `.dibblaignore` (server-side VCS filter)
 
-When the deploy archive arrives at the backend, a second filter decides which files get committed to Dibbla-managed version control (the bare repo and optional GitHub mirror tied to the app). **This filter only affects VCS history — it does not change what the Docker build sees.** Files excluded from VCS still ship in the build context.
+When the deploy archive arrives at the backend, a second filter decides which files get committed to Dibbla-managed version control (the bare repo and optional GitHub mirror tied to the app). **This filter only affects VCS history — it does not change what the Docker build sees.** A file excluded from VCS by *this* filter still ships in the build context.
+
+**That is a statement about this filter, not about the build context.** A *third*, independent filter does strip directories out of the build context during archive extraction — see "Build-context strip (`skippedDirs`)" immediately below. `.dibblaignore` neither triggers it nor exempts anything from it.
 
 | Item | Details |
 |------|---------|
@@ -349,6 +361,60 @@ fixtures/*.bin
 ```
 
 **Rule of thumb:** if it's generated, secret, or large, put it in `.dibblaignore`. If the deploy response surfaces a `vcs_filtered` entry on every deploy, add it to `.dibblaignore` to clean up the log.
+
+### Build-context strip (`skippedDirs`)
+
+**This is the filter that decides what your `Dockerfile` can `COPY`.** It is a different mechanism from `.dibblaignore` above, with a different purpose, and it is the one that produces build failures.
+
+**The durable rule:** the build context is your source tree **minus a set of regenerable directories**. Treat dependency and build-output directories as **absent** at `docker build` time and produce them in a build step.
+
+While extracting the uploaded archive, `deploy-api` drops these eight directories entirely. Anything inside them is gone before `docker build` ever runs:
+
+`node_modules/` · `.git/` · `__pycache__/` · `.venv/` · `vendor/` · `.next/` · `dist/` · `.cache/`
+
+| Item | Details |
+|------|---------|
+| **When it happens** | During archive extraction, before the build context is handed to Docker — and before the file is even counted against the deploy's file budget. |
+| **What you see** | **Nothing, until the build breaks.** The strip itself is silent: no warning, no `vcs_filtered` entry, no line in the build log. The first sign is `BUILD_FAILED` on the `copy-source` step, with a buildkit message ending `"/vendor": not found`. |
+| **Why it exists** | The extractor enforces hard budget caps — 50 MB archive, 200 MB extracted, **1000 files**, 10 path levels. A Go `vendor/` or JS `node_modules/` tree routinely holds thousands of files and would trip `ErrTooManyFiles` before your real source was counted. Skipping them is what keeps ordinary projects under the cap. |
+| **Matching** | Prefix match on path components: a directory at the archive root or nested at any depth (`svc/vendor/…`) is stripped. Near-misses are safe — `vendored/`, `mydist/`, `distribution/`, `src/dist.go` and `vendor.json` all survive. One sharp edge: a **regular file** named exactly `dist` or `vendor` (no extension) is also stripped, because the match is on the name, not on the entry type. |
+| **Scope** | Global and constant. It does not vary by org, by plan or by instance — plan entitlements bound only app and database counts. There is no opt-out, no `.dibblakeep`, and `.dibblaignore` has no influence over it. |
+| **Source of truth** | `app-hosting-service/deploy-api/internal/extractor/extractor.go`, `skippedDirs`. List as of **2026-08-23**; a test pins the exact contents, so it cannot change silently. |
+
+**The two that actually bite: `vendor/` and `dist/`.** The CLI's own exclusion list already strips `.git` and `node_modules` before upload, so those never arrive either way and their absence surprises nobody. The other six are stripped **server-side only** — they leave your machine, and then vanish.
+
+```dockerfile
+# ✗ FAILS on the platform, builds fine locally.
+#   BUILD_FAILED on step copy-source, ending: "/vendor": not found
+COPY vendor/ ./vendor/
+RUN go build -mod=vendor -o /app ./cmd/server
+
+# ✓ Regenerate in the build instead.
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN go build -o /app ./cmd/server
+```
+
+```dockerfile
+# ✗ FAILS — dist/ was stripped from the upload.
+COPY dist/ /usr/share/nginx/html
+
+# ✓ Build it in a stage. COPY --from=<stage> reads from an earlier
+#   build stage, NOT from the upload archive, so it is unaffected.
+FROM node:20 AS build
+COPY package*.json ./
+RUN npm ci
+COPY . .
+RUN npm run build          # produces /app/dist inside the stage
+
+FROM nginx:alpine
+COPY --from=build /app/dist /usr/share/nginx/html
+```
+
+The same applies to Python (`pip install -r requirements.txt` rather than shipping `.venv/`) and to Next.js (`npm run build` rather than shipping `.next/`).
+
+**Pre-deploy check:** `guardrails.md` Check 9 catches this before a deploy is attempted.
 
 ### Flags
 
@@ -409,6 +475,8 @@ For the manifest schema, env-aware fields, profiles, service discovery, NetworkP
 | `INVALID_HEALTHCHECK` / `MISSING_HEALTHCHECK` | Healthcheck declaration violates the schema (multiple probes / missing required fields) | See manifest.md § 12 |
 | `HEALTHCHECK_FAILED` / `HEALTHCHECK_TIMEOUT` | Probe didn't pass at deploy time | Check pod logs; relax `failure_threshold` / `initial_delay_seconds` for slow boots |
 | `SERVICE_NAME_TOO_LONG` | Computed K8s name `{alias}-{service}` exceeds 63 chars | Shorten the alias or service name |
+| `PLAN_LIMIT_EXCEEDED` | The org's plan is at its app or database limit (checked BEFORE any upload/build) — an at-limit org can always still redeploy its existing apps | Upgrade in the console (Org settings → Plan) or remove an app/database; the error's `Docs:` line links https://docs.dibbla.com/reference/plans |
+| `TRIAL_EXPIRED` | The org's free trial has ended; deploys and creates gate while running apps keep serving | Upgrade in the console (Org settings → Plan) — the gate lifts immediately on payment |
 
 ---
 
@@ -683,6 +751,81 @@ DATABASE_URL="${DATABASE_URL_MY_DB}"
 ```
 
 > The injected credential is a **Dibbla-managed per-database proxy secret**, not your Postgres role password, and only works **through the proxy** — don't try to use it to connect to a database host directly.
+
+---
+
+## storage
+
+Managed S3-compatible object storage — buckets provisioned and operated like
+databases. Alias: `dibbla buckets`. Creating a bucket provisions credentials
+**scoped to exactly that bucket** (they cannot read or list any other bucket)
+plus a **hard quota**, and injects four secrets automatically:
+`STORAGE_<NAME>_ENDPOINT`, `STORAGE_<NAME>_BUCKET`,
+`STORAGE_<NAME>_ACCESS_KEY_ID`, `STORAGE_<NAME>_SECRET_ACCESS_KEY` — where
+`<NAME>` is the bucket name uppercased with hyphens turned into underscores
+(bucket `my-uploads` → `STORAGE_MY_UPLOADS_*`). App code reads those env vars
+and speaks plain S3 (any SDK; path-style, region `us-east-1`).
+
+On an instance without managed storage configured, every command fails with
+`STORAGE_NOT_CONFIGURED` (503) — that's the server saying the feature is off,
+not a CLI bug.
+
+### storage list
+
+| Item | Details |
+|------|---------|
+| **Usage** | `dibbla storage list [--quiet | -q]` |
+| **Flags** | `--quiet`, `-q` — names only, one per line (scripting) |
+
+### storage create
+
+| Item | Details |
+|------|---------|
+| **Usage** | `dibbla storage create [name]` or `dibbla storage create --name <name>` |
+| **Arguments** | `name` (optional as position) — bucket name |
+| **Flags** | `--name` — bucket name (alternative to argument) |
+| | `--deployment <alias>` — scope the bucket and its `STORAGE_*` secrets to a specific deployment (omit for org-global) |
+| | `--size <quota>` — hard quota, e.g. `5Gi`, `500Mi` (default 5Gi; server-side ceiling applies) |
+| | `--expire-days <n>` — auto-delete objects older than n days (0 = never) |
+| **Name rules** | 3–48 chars, lowercase letters, digits and hyphens; must start **and** end alphanumeric. Pattern: `^[a-z0-9][a-z0-9-]{1,46}[a-z0-9]$`. Underscores and uppercase are rejected. Reserved names (`workflows`, `files`, `cnpg-backups`, `workflow-artifacts`) are refused. |
+| **Quota** | The quota is **hard** — uploads beyond it fail with an S3 error. Choose `--size` for real usage. |
+
+### storage delete
+
+| Item | Details |
+|------|---------|
+| **Usage** | `dibbla storage delete <name>` |
+| **Arguments** | `name` (required) |
+| **Flags** | `--yes`, `-y` — skip confirmation |
+| | `--force` — delete even if the bucket still holds objects (irreversible) |
+| | `--quiet`, `-q` — errors only (scripting) |
+| **Behaviour** | Deletes the bucket, its scoped credentials **and** the four injected secrets. A non-empty bucket is refused without `--force`. |
+
+### storage rotate
+
+| Item | Details |
+|------|---------|
+| **Usage** | `dibbla storage rotate <name> [--no-restart]` |
+| **Arguments** | `name` (required) |
+| **Flags** | `--no-restart` — skip restarting the bound deployment's services |
+| **Behaviour** | Re-mints the scoped credentials and re-syncs the injected secrets. **Rotation is restart-coupled**: pods read secrets via env at start, so the bound deployment's services are restarted automatically to pick up the new key. With `--no-restart`, running pods keep the old — now invalid — key until you restart them yourself (`dibbla apps restart`). |
+
+### storage info
+
+| Item | Details |
+|------|---------|
+| **Usage** | `dibbla storage info` |
+| **Output** | Table of every bucket: size, object count, quota. Size figures come from the store's usage accounting and can lag by a scan cycle. |
+
+### storage credentials
+
+| Item | Details |
+|------|---------|
+| **Usage** | `dibbla storage credentials <name> [--deployment <alias>] [--quiet | -q]` |
+| **Arguments** | `name` (required) — bucket name |
+| **Flags** | `--quiet`, `-q` — print only the export lines (for `eval`) |
+| | `--deployment <alias>` — where the bucket's secrets are scoped (omit for org-global) |
+| **Output** | Shell `export` lines (`AWS_ENDPOINT_URL`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `DIBBLA_BUCKET`) read from the injected secrets, for human use with `aws`/`mc`/`rclone`: `eval "$(dibbla storage credentials mybucket -q)"`. There is no `storage connect` — S3 has no psql analog to wrap. |
 
 ---
 

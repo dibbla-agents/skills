@@ -1,8 +1,8 @@
 # Dibbla CLI — Pre-deploy guardrails
 
-Before calling `dibbla deploy`, you **MUST** complete all seven checks below and present findings to the user. **Never deploy autonomously** — always wait for explicit user confirmation.
+Before calling `dibbla deploy`, you **MUST** complete every check below that applies, and present findings to the user. **Never deploy autonomously** — always wait for explicit user confirmation.
 
-Checks 1–4 and Check 7 are mandatory for every deploy. Check 5 only fires when running task files from URLs (`dibbla run <url>` / `dibbla template install`). Check 6 only fires when a `dibbla.yaml` is present at the deploy root.
+Most checks are mandatory on every deploy. The exceptions are the three that state their own trigger in their heading line — read each check's opening sentence rather than a list here, because a list here is a second inventory that can disagree with the file. Today those three are Check 5 (running task files from URLs), Check 6 (a `dibbla.yaml` at the deploy root) and Check 8 (that manifest setting `support.enabled: true`).
 
 > **Enforced by the CLI.** `dibbla deploy` refuses to upload when `REVIEW.md` is missing at the deploy root, when no user handbook (`docs/index.md` or `APP.md`) is present, or when that handbook's `subtitle:` frontmatter is missing, empty, still a placeholder (`TBD`/`TODO`/`{{…}}`/`<one short…>`), or over the 140-byte hard cap. The only way past the gate is `--skip-review`, which is reserved for humans making one-line fixes — agents must run this checklist and write `REVIEW.md` (see Step 3.5) rather than passing the flag.
 
@@ -17,7 +17,7 @@ Checks 1–4 and Check 7 are mandatory for every deploy. Check 5 only fires when
 
 ## Check 1: Security (OWASP Top 10)
 
-Scan all application source files for:
+Mandatory for every deploy. Scan all application source files for:
 
 | What to check | Severity | Examples |
 |----------------|----------|----------|
@@ -36,7 +36,7 @@ Scan all application source files for:
 
 ## Check 2: Database usage
 
-Scan all database-related code for:
+Mandatory for every deploy. Scan all database-related code for:
 
 | What to check | Severity | Examples |
 |----------------|----------|----------|
@@ -50,7 +50,7 @@ Scan all database-related code for:
 
 ## Check 3: REST / API call patterns
 
-Scan all outbound HTTP/API call code for:
+Mandatory for every deploy. Scan all outbound HTTP/API call code for:
 
 | What to check | Severity | Examples |
 |----------------|----------|----------|
@@ -65,7 +65,7 @@ Scan all outbound HTTP/API call code for:
 
 ## Check 4: External system write safety
 
-Scan code that writes to external systems (APIs, queues, email, SMS, webhooks, third-party services):
+Mandatory for every deploy. Scan code that writes to external systems (APIs, queues, email, SMS, webhooks, third-party services):
 
 | What to check | Severity | Examples |
 |----------------|----------|----------|
@@ -148,11 +148,52 @@ Mandatory for every deploy. The platform renders a user-facing handbook inside `
 
 ---
 
+## Check 8: Support reachability (P-0024)
+
+Run when `dibbla.yaml` sets `support.enabled: true`. Skip otherwise.
+
+| What to check | Severity | Examples |
+|----------------|----------|----------|
+| The app gives users a visible way to reach support | WARNING | `support.enabled: true` but no `<script src="/_platform/support.js"></script>` tag anywhere in the app's HTML and no link to `app.<domain>/apps/<alias>/support` — the org opted into tickets its users cannot file. Suggest adding the one-line widget tag to the app's layout. Deliberately a warning, never a blocker: the handbook gate is already blocking, and two blocking UX gates would be too coercive. |
+| `visibility` matches the app's audience | INFO | A public app (`require_login: false` / policy open) with default `visibility: app` means every signed-in user can read every ticket — fine for a community tool, wrong if tickets may carry private detail. Mention `visibility: own`. |
+
+---
+
+## Check 9: Build-context readiness (P-0009)
+
+Runs on **every** deploy that has a `Dockerfile` — which is every deploy.
+
+`deploy-api` silently strips eight regenerable directories out of the uploaded archive **before** it becomes the Docker build context. A `COPY` of one of them builds fine on the developer's machine and fails on the platform with `BUILD_FAILED` on the `copy-source` step, ending `"/vendor": not found` — pointing at a directory the user can see sitting in their working tree. Catch it here, before the deploy is attempted.
+
+The eight: `node_modules/` · `.git/` · `__pycache__/` · `.venv/` · `vendor/` · `.next/` · `dist/` · `.cache/`
+(Source: `app-hosting-service/deploy-api/internal/extractor/extractor.go`, `skippedDirs`, as of 2026-08-23. Full rationale in `reference.md` → deploy → "Build-context strip (`skippedDirs`)".)
+
+| What to check | Severity | Examples |
+|----------------|----------|----------|
+| A `COPY` or `ADD` in the `Dockerfile` whose **source operand resolves into one of the eight stripped directories** | **BLOCKER** | `COPY vendor/ ./vendor/`, `COPY dist ./dist`, `COPY .next ./.next`, `COPY ./web/dist /usr/share/nginx/html`. Fix by regenerating in the build: `RUN go mod download` (Go), `RUN npm ci && npm run build` (Node), `RUN pip install -r requirements.txt` (Python) — or move the artifact into a build stage and use `COPY --from=`. |
+
+**Two precision rules. Without them this check is noise, and a noisy check trains agents to ignore it.**
+
+1. **`COPY --from=<stage>` is exempt — always.** `COPY --from=builder /app/dist ./dist` copies from an earlier *build stage*, not from the upload archive. It is the pattern this check steers people towards, so flagging it would be actively harmful. The same applies to `COPY --from=<image>`.
+2. **Match on the source operand, not on the line.** The check fires when a `COPY`/`ADD` *source* path resolves into one of the eight directories. It does **not** fire because one of the names appears somewhere else on the line. `COPY . .` does not fire (it copies whatever survived, which is correct). `COPY src/dist.go ./` does not fire — `dist.go` is a file, not the `dist/` directory. `COPY dist/ ./dist` does fire.
+
+**Why BLOCKER and not WARNING** — this is a deliberate departure from the precedent Check 8 set (decision log D27 made support reachability a warning). Check 8 predicts a product-quality shortfall whose worst case is still a working deploy. This one predicts a **deterministic build failure**: the file is not there, `COPY` fails, the deploy fails, every time. That is the definition of BLOCKER above.
+
+**If found:**
+
+1. Show the user the offending `COPY`/`ADD` line with its file path and line number.
+2. Explain that the directory is stripped server-side and will not be in the build context, however present it looks locally.
+3. Propose the in-build regeneration (or the `--from=` stage) and apply it, then re-run Check 9.
+
+Reference fixtures for this check live in `testdata/guardrail-fixtures/` — one Dockerfile that must trip it and one that must not.
+
+---
+
 ## Interactive workflow
 
 ### Step 1: Run all applicable checks
 
-Review the application source code against every applicable check above (1–4 and 7 always; 5 if running task files from URLs; 6 if a `dibbla.yaml` is at the deploy root). Note each finding with its file path and line number.
+Review the application source code against every check above, skipping only those whose own opening line says they do not apply to this deploy. Note each finding with its file path and line number.
 
 ### Step 2: Present the report
 
@@ -171,8 +212,10 @@ Show the user a guardrails report in this format:
 - [x] External writes: OK
 - [ ] User handbook: 1 BLOCKER
   - BLOCKER: No `docs/index.md` or `APP.md` at project root — generate from templates in user-docs.md.
+- [ ] Build-context readiness: 1 BLOCKER
+  - BLOCKER: `Dockerfile:12` — `COPY vendor/ ./vendor/` copies a directory the server strips from the build context. Replace with `RUN go mod download`.
 
-**Result: BLOCKED** — 2 blockers must be fixed before deploying.
+**Result: BLOCKED** — 3 blockers must be fixed before deploying.
 ```
 
 ### Step 3: Wait for user confirmation
@@ -197,7 +240,7 @@ One-Sentence-Summary: "<brief summary of findings>"
 ```
 
 **Status mapping:**
-- `Ok` — all four checks passed with no blockers or warnings
+- `Ok` — every applicable check passed with no blockers or warnings
 - `Warnings` — no blockers found, but warnings are present (user chose to proceed)
 - `Critical` — blockers were found and fixed before deploying
 
