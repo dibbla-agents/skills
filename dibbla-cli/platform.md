@@ -288,12 +288,34 @@ until the next successful deploy. Snapshots are garbage-collected after 90 days.
    is a `404` with `APPLICATION_CHECKS_DISABLED` (CLI exit 4) — and a disabled
    org spends **zero** tokens: nothing is scheduled, nothing is judged.
 2. **Per-app enablement.** `dibbla apps checks enable <alias>` (owner/admin)
-   starts the schedule. Definitions existing is *not* activation — a file in the
-   repo never silently starts running work. `disable` stops scheduled runs and
-   keeps definitions and history readable.
+   turns the app's checks runtime on. Definitions existing is *not* activation —
+   a file in the repo never silently starts running work. `disable` turns it off
+   and keeps definitions and history readable. Note that enabling does not by
+   itself produce a result: nothing runs on a cadence today, so `dibbla apps
+   checks run` is what executes a check.
 
 If a user reports "I added the file and nothing happens", the answer is almost
 always one of these two switches, in that order.
+
+### A deploy is never failed by its checks promotion
+
+Checks are promoted onto the new revision **after** Kubernetes confirms the
+rollout, so by then the app is already serving traffic. When that promotion
+cannot complete — most often because this environment gates Application Checks
+off on purpose and the store answers `503 APPLICATION_CHECKS_UNAVAILABLE` — the
+deploy still reports **success with exit code 0**, and carries a
+`checks_notice` explaining what was not updated (a `checks ·` line in the CLI,
+`checks_notice` in `--json`). The checks state itself is fenced, so no stale
+definitions stay attached to the new revision.
+
+Read that notice as information, not as a failed deploy: **do not re-run, and
+do not reach for `deploy --force`.** A genuine deploy failure still exits
+non-zero and says so.
+
+Before SLC-0129 this was a terminal `✗ APPLICATION_CHECKS_UNAVAILABLE` with
+exit 1 on a deploy that had in fact succeeded — measured in production on three
+consecutive live deploys. If you are reading CLI output from an older binary,
+that red is what this describes.
 
 ### Scheduling
 

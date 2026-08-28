@@ -1234,11 +1234,20 @@ hand-written or agent-drafted journey is rejected.
 and it changes the classification, and that is *all* it does today: there is no
 API to create the grant it names, and nothing resolves the name at run time
 (verified 2026-08-26 — the field appears in the loader's validation and the
-classification derivation and nowhere else). If a user asks for a journey that
-logs in or submits a form, say so and steer them to read-only journeys
-(`navigate` + `assert_text`) and `http_sequence` checks, which work today. Do not
-draft a `click`/`fill` journey and present it as something they can deploy and
-rely on.
+classification derivation and nowhere else). That is the smaller of two problems.
+
+**Only `http_sequence` executes at all.** `core/go-toolserver/functions/applicationchecks/function.go:270`
+returns outcome `indeterminate` with code `CHECK_KIND_UNSUPPORTED` for every
+other kind — `browser_journey` (read-only or not), `semantic` and `composite`
+alike. They still pass validation and deploy green, so nothing warns the user.
+The outcome is neither pass nor fail, which reads as "all clear" more easily
+than a failure would.
+
+So: **draft `http_sequence` checks only.** If a user asks for a journey, tell
+them it will validate, deploy, and then report nothing about their app. Do not
+draft any other kind and present it as something they can deploy and rely on —
+an earlier version of this file steered users to read-only journeys as though
+they worked, which was never true on this runtime revision.
 
 ### 22.5. `semantic` and `composite`
 
@@ -1323,8 +1332,9 @@ Authoring is this file; running and reading are CLI commands —
 `dibbla apps checks list|run|history|enable|disable`, with the product exit
 codes (`0` pass, `8` fail, `9` error, `10` indeterminate) — see
 [reference.md § apps checks](reference.md). Definitions existing does **not**
-start the schedule: `dibbla apps checks enable <alias>` does, and it needs
-owner/admin. The org-level capability must also be on, or every call is a 404
+activate anything: `dibbla apps checks enable <alias>` turns the app's runtime
+on, and it needs owner/admin. Enabling still runs nothing on its own — nothing
+runs on a cadence today, so results come from `dibbla apps checks run`. The org-level capability must also be on, or every call is a 404
 with `APPLICATION_CHECKS_DISABLED`.
 
 ---
