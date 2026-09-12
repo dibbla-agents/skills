@@ -4,6 +4,33 @@ What your application must look like to build and run on Dibbla. Use this as the
 
 ---
 
+## 0. Two surfaces, two skills
+
+This file is about what an application must look like to build and run on
+Dibbla, and it is written for a surface with a shell. The other way into Dibbla
+is the **connector** — the MCP endpoint at `https://mcp.dibbla.com/platform`,
+which claude.ai, Claude Cowork, Claude Code, Codex CLI and ChatGPT connect to
+over OAuth. It has its own skill, `dibbla-platform`, served by the connector and
+versioned with the platform capability contract rather than with a CLI release.
+
+What is on that surface: applications and their configuration, the source of a
+running app (find, search, read, and patch single files without downloading
+anything), deploys — including sending a whole source tree inline in the tool
+call, with no filesystem — preflight, deployment history and proposals, logs,
+checks, secrets by name, databases, storage buckets, workflows, durable
+operations, and a two-step human-approved path for every irreversible change.
+
+What is not, and stays here: reading or writing the caller's filesystem,
+executing anything on their machine, and returning credential material to a
+terminal.
+
+The Dockerfile and runtime rules in this file are true on **both** surfaces —
+they are properties of the platform, not of the CLI. The commands are not.
+Do not hand a `dibbla` command to an agent whose only access is the connector's
+`platform_*` tools; it has no shell to run it in.
+
+---
+
 ## 1. Scope check — is this even a Dibbla project?
 
 Before applying any of this, confirm at least one Dibbla marker exists in the project:
@@ -373,10 +400,86 @@ backlog to drain.
 
 ---
 
+## 8.8. Maintenance agent — the runtime model
+
+An opt-in overnight agent per app. It reads the app's logs, the source that
+shipped, and recent application-check history, then leaves one of three typed
+answers: nothing to report, a recorded finding, or a concrete code **proposal**
+that a *different* human must approve. The agent never writes `main`, never
+approves itself, and never carries a user token.
+
+Commands: `dibbla apps maintenance status|enable|disable|run|runs` and
+`dibbla apps proposals list|show|approve|deny|retry`. Flag-level detail is in
+[reference.md](reference.md).
+
+### Two switches, both off by default
+
+1. **Org capability.** Feature-gated per organization. When it is off, every
+   maintenance call is a `404` with `MAINTENANCE_AGENT_NOT_FOUND` (CLI exit 4).
+   That is the rollout, not a missing app — do not send the user to `apps list`.
+2. **Per-app enablement.** `dibbla apps maintenance enable <alias>` (owner/admin)
+   turns this app on. Shipping code does not start anything. `disable` stops new
+   runs and keeps history readable.
+
+If a user reports "I asked for a run and nothing happens", check these two
+switches in that order.
+
+### Budget
+
+Maintenance draws from the organization's **shared Application Check token
+pool**. A run that hits the ceiling terminalises as `budget_exhausted`
+(`BUDGET_EXHAUSTED` / `BUDGET_LIMIT_REACHED`) and the CLI exits **0**. That is
+the ceiling working, not an agent failure and not a finding about the app. Do
+not map it to `run_error`.
+
+### Run contract
+
+`dibbla apps maintenance run <alias>` starts one execution. Reuse
+`--idempotency-key` to replay the same intent; a second call with the same key
+returns and follows the original execution (`replayed: true`) instead of
+starting another run and spending again.
+
+`--follow --json` is NDJSON ending in exactly one `type: "summary"` object with
+`outcome` and `exit_code`. Sync `--json` is one document with the same fields
+next to `execution`.
+
+Product exits: `0` for `found_nothing` / `proposed` / `budget_exhausted` /
+`skipped` / `cancelled`; `11` for `finding_recorded`; `1` for `run_error` /
+`assessment_blocked` / `unknown_outcome`. Transport keeps `3/4/5/6/7/1`.
+
+The execution read model is the observation receipt: `summary`, `fingerprint`,
+`evidence_refs`, `proposal_id`, `deduplicated`, `used_tokens`. A known
+fingerprint can revalidate without pretending the night was empty.
+
+`--mode check-triage` requires `--check-run`; `nightly` (the default) rejects
+that flag. Unknown modes are exit 5 with zero requests.
+
+### Proposals and four-eyes
+
+A proposal is a server-owned change in the app's deploy queue. Show renders the
+API `decision` object (`can_decide`, `reason`, `message`); the CLI never
+computes eligibility. Approve/deny/retry POST to the decision endpoint. The
+maintenance author cannot approve its own proposal. At most one proposal per
+app per day: a second finding is recorded, it does not open a second change.
+
+`--diff --json` emits one `type: "proposal_review"` document whose `proposal`
+and `diff` fields are the unmodified API documents.
+
+### What it never does
+
+- Deploy on its own.
+- Carry a user API token. The run uses a short-lived workload identity bound
+  to this app, execution and lease.
+- Publish raw logs, credential diffs or customer data in a result document.
+- Spend past the shared budget as a policy.
+
+---
+
 ## 9. Public URL & access control
 
 - Default public URL: `https://<alias>.dibbla.com`.
 - Gate access with `dibbla deploy --require-login` (any authenticated Dibbla user) plus `--access-policy invite_only` (only explicitly invited users) or `--access-policy all_members` (all org members).
+- **Inviting people to an `invite_only` app** happens in the console (app card → ⋮ → **Access & users**), not the CLI. Two buttons: **Add member** picks an existing org member; **Invite by email** admits *anyone* by address — a client, a contractor, a tester — to **this app only**. An e-mail invite never makes the person an org member: if the address already has a Dibbla account, access is live at once; if not, it is granted the first time they sign in. Do **not** invite app end users to the *organisation* (portal → Members) just to let them into an app: org membership grants console access, not app access, and a viewer-role member who only needed one app is the wrong outcome.
 - Request additional Google OAuth scopes (Drive, Calendar, etc.) via `--google-scopes`.
 - TLS certificates and routing are managed by the platform — no app-side configuration needed.
 
@@ -507,3 +610,110 @@ These are application-side concerns. For the security review before deploy, run 
 - [ ] `.dibblaignore` covers build outputs and any large generated files.
 - [ ] App tolerates an ephemeral local filesystem; persistent state lives in Postgres or external storage.
 - [ ] Pre-deploy security review (`guardrails.md`) completed and `REVIEW.md` written before deploying.
+
+---
+
+## 13. `/platform` — doing the same things without a terminal
+
+Everything in this file describes the CLI. The same platform is reachable over
+MCP at the OAuth-protected `/platform` endpoint, and the rule binding the two is
+one sentence:
+
+> **What a signed-in human can do with the `dibbla` CLI, an OAuth grant with the
+> right scope can do through `/platform`.**
+
+Connect a client with `dibbla mcp platform` (writes the MCP client config and
+runs the OAuth login). Then the same work — deploy, restart, configure, set
+secrets, provision a database or bucket, apply a workflow, run checks, delete —
+is a tool call rather than a shell command.
+
+### Parity is measured in capabilities, not in tools
+
+The unit is the **contract row**, not the command. Several CLI commands may map
+to one capability (`apps checks enable` and `apps checks disable` are two
+commands and one row), and — far more often — **one tool delivers several
+capabilities**. A full write grant lists **30 tools** for everything the
+platform can do. So do not look for a tool per command; look for the flow, and
+then for the parameter that names your step of it.
+
+### The map: which tool owns which flow
+
+A tool is a flow and a desired state. `alias`, `name` or another identifier
+chooses the zoom level; `view`, `action`, `kind`, `depth` or `resource` chooses
+the step.
+
+| You want to | Tool | The parameter that says which step |
+|---|---|---|
+| Know who and where you are, and which organizations you belong to | `platform_whoami` | — |
+| See what you can build with: templates, workflow functions, providers | `platform_catalog` | `kind` |
+| List apps, read one, read its maintenance settings and runs | `platform_apps` | omit `alias` to list; `view: maintenance` |
+| Read an app's logs | `platform_app_logs` | — |
+| See an app's checks, or what they found | `platform_app_checks` | `view: definitions` \| `history` |
+| Run checks now, or one maintenance run | `platform_app_run` | `kind: checks` \| `maintenance` |
+| Change env vars, resources, or scheduled maintenance | `platform_app_config_update` | `maintenance_enabled` |
+| Restart | `platform_app_restart` | — |
+| Turn an app's checks runtime on or off | `platform_app_checks_set_enabled` | — |
+| List databases, read one, see its phase | `platform_databases` | omit `name` to list |
+| Read rows | `platform_database_rows_query` | — |
+| Create a database | `platform_database_provision` | — |
+| List buckets or read one | `platform_storage_buckets` | omit `name` to list |
+| Create a bucket or rotate its credential | `platform_storage_bucket_write` | `action` |
+| List secret names | `platform_secrets` | — |
+| Store, rotate or remove a secret | `platform_secret_write` | `action: set` \| `delete` |
+| Read deployment history, one revision, or the running deploy's logs | `platform_deployments` | `sha`, `view: logs` |
+| Check a `dibbla.yaml`, or preview what it would apply | `platform_deployment_preflight` | `depth: validate` \| `preview` |
+| Deploy | `platform_deployment_start` | — |
+| Propose a deploy, follow it, approve, deny or retry it | `platform_deployment_proposals` | `action` |
+| List workflows, read one, its revisions, or its HTTP surface | `platform_workflows` | omit `name` to list; `view` |
+| Check a workflow definition without saving it | `platform_workflow_validate` | — |
+| Create, replace or roll back a workflow | `platform_workflow_apply` | `definition` or `revision` |
+| Start a workflow | `platform_workflow_execute` | — |
+| Follow anything long-running | `platform_operation` | `view: status` \| `events` \| `logs` \| `output` |
+| Stop it | `platform_operation_cancel` | — |
+| Read the files of a running app | `platform_files` | `action: glob` \| `grep` \| `read` |
+| Move a file in or out | `platform_files` | `action: prepare_upload` \| `prepare_download` \| `status` \| `abort` |
+| Tell Dibbla what is working and what is not | `platform_feedback` | `action` |
+| Destroy something irreversibly | `platform_destructive_plan` → human approval → `platform_destructive_execute` | `resource` |
+
+Two things this table does not say, and both matter:
+
+- **You see only what your grant carries.** A tool whose scope you lack is not
+  listed at all, and on a merged tool the `action`/`view`/`kind`/`resource` enum
+  shows only the steps your scopes allow. An action you cannot see is not
+  missing; it is not yours.
+- **Approval has no tool.** `platform_destructive_plan` returns a console URL
+  and an expiring `request_id`; a human opens that URL and approves; only then
+  does `platform_destructive_execute` work. No sequence of tool calls adds up to
+  an approval, and asking a user to paste the `request_id` back is not one
+  either.
+
+### What is deliberately *not* remote, and why
+
+These are not gaps. Each is a `local-only` row in the platform capability
+contract with a technical reason, and the reason is always the same shape —
+something on the caller's own machine that no remote call can reach:
+
+| Contract row | Commands | Why it can never be remote |
+|---|---|---|
+| `cli.deploy.archive` | `deploy` | Reads the caller's filesystem to build the upload archive. The **deploy itself** is remote (`platform.deployments.start`); only the archiving is local. |
+| `cli.run` | `run` | Executes commands on the caller's machine. |
+| `cli.manifest.validate` | `manifest validate` | A local file walk. Server-side validation of the same manifest is remote (`platform.manifests.validate`, which is `platform_deployment_preflight`). |
+| `cli.credentials.reveal` | `secrets get`, `storage credentials`, `db connect` | Returns credential material in plaintext. Keeping credentials out of a model's context window is an invariant, not a precaution. |
+| `cli.secrets.import` | `secrets import` | Reads a `.env` file from disk. Setting one secret at a time *is* remote. |
+| `cli.db.dump` | `db dump` | Needs the caller's `pg_dump` and writes to the caller's disk. |
+| `cli.clone` | `clone` | Writes a git working copy locally. Reading the same source remotely is `platform.files.get`. |
+| `cli.scaffold` | `create go-worker`, `template install`, `skills install` | Materialises files in a directory on the caller's machine. |
+| `cli.login`, `cli.context`, `cli.org.select` | `login`, `logout`, `context …`, `org use/clear` | The OS keyring, a TTY, and local config. Remotely, who you are and which org you act as are fixed by the grant — a model-controlled context or org switch is forbidden outright. |
+| `cli.update` | `update`, `uninstall` | Replaces a binary on the caller's machine. |
+| `cli.ai_gateway`, `cli.mcp_client_config` | `ai …`, `mcp …` | Answers about the calling machine's environment and its agent's config file. |
+| `cli.admin` | `admin reconcile` | Gated by `DIBBLA_ADMIN_TOKEN`, an operator marker that lives outside the OAuth grant model entirely. |
+
+There is nothing else. Every other CLI capability is reachable through
+`/platform` today; a gap would be a `not-yet-available` row with an owner and a
+work item, never silence, and there are none. The authoritative, always-current
+table is the [platform capability contract](https://docs.dibbla.com/reference/platform-contract).
+
+**This is enforced, not documented.** `dibbla-cli` fails its own build when a
+command has no capability row, and `app-hosting-service` fails its own build
+when a row claims a tool that is not in `tools/list`. A command added without a
+decision cannot reach a release.

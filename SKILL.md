@@ -2,6 +2,16 @@
 
 You are an expert in using the `dibbla` command-line tool.
 
+**This skill is the CLI. The Dibbla connector has its own.** The MCP connector
+at `https://mcp.dibbla.com/platform` — used by claude.ai, Claude Cowork, Claude
+Code, Codex CLI and ChatGPT — is covered by the `dibbla-platform` skill, which
+the connector itself serves and which is versioned with the platform capability
+contract. That skill is written for an agent that has tool calls and may have no
+shell, so it names no `dibbla` commands. Install this skill for a surface with a
+shell and a signed-in CLI; install that one for a surface whose only access is
+the `platform_*` tools. Handing an agent the wrong one gives it thousands of
+lines of instructions it cannot act on.
+
 ## Installation
 
 The `dibbla` CLI can be installed via Homebrew (on macOS or Linux), `curl` (macOS/Linux), PowerShell (Windows), or by using `go install`. For detailed, up-to-date installation instructions, refer to the project's `README.md` file.
@@ -156,6 +166,27 @@ Trigger a K8s rolling restart of one service in a multi-service deployment. Idem
 -   **Errors:** 404 (service not found) prints a hint to run `dibbla apps list`. Bad service-name regex is caught locally before the HTTP call.
 -   **Example:** `dibbla apps restart myapp --service worker` — **Quiet:** `dibbla apps restart myapp -s web -q`
 
+#### `apps releases`
+
+List the releases the platform still holds for an app: one immutable image per successful deploy (`dep_…` id), newest first, with digest, deploy time, author, and which one is running. A release marked `gone` was swept by registry retention and cannot be rolled back to; `+config` means the platform remembers its port/env/resources (what recreating a missing deployment needs).
+
+-   **Usage:** `dibbla apps releases <alias>`
+-   **Flags:** `--json`: print the raw API document.
+-   **Errors:** 404 `NOT_FOUND` when the alias has neither a deployment nor any saved release in your organization.
+-   **Example:** `dibbla apps releases myapp`
+
+#### `apps rollback`
+
+Switch a running app to an earlier release's image **without a build** — the way back when a deploy went wrong or the build service/registry is down. A rolling update; the app answers with the earlier version within about a minute. Env, resources and the login gate are inherited from the running app (like `deploy --update` with no flags); secrets are untouched. If the deployment is missing (a `--force` deploy removed it and the build failed), rollback recreates it from the release's image with the configuration the platform saved.
+
+-   **Usage:** `dibbla apps rollback <alias> [--to <dep-id>]`
+-   **Flags:**
+    -   `--to <dep-id>`: Release to roll back to (from `apps releases`). Default: the previous release (newest one not running).
+    -   `-y`, `--yes`: Skip the confirmation prompt (required in scripts/agents — without a terminal the command refuses with exit 5).
+    -   `--json`: Print the JSON response body.
+-   **Errors:** `RELEASE_GONE` (410) — the image was removed by retention; the message names the releases still available. `RELEASE_NOT_FOUND` (404) — not a release of this app, or no previous release. `RELEASE_CONFIG_UNKNOWN` / `ROLLBACK_UNSUPPORTED` (409) — the deployment is gone with no saved config, or the app is multi-service/stateful: `dibbla deploy` from source instead.
+-   **Example:** `dibbla apps rollback myapp -y` — **Specific:** `dibbla apps rollback myapp --to dep_k3f9a -y`
+
 #### `apps checks`
 
 Inspect and run an app's **application checks** — the assertions in `dibbla-checks.yaml` that prove the running app still does what it is for. This is not a `healthcheck:` in `dibbla.yaml`: that is a kubelet probe about the container, and it cannot see a broken signup form. The alias is always positional; a single check id is always the `--check` flag.
@@ -166,6 +197,25 @@ Inspect and run an app's **application checks** — the assertions in `dibbla-ch
 -   **`apps checks enable|disable <alias> [--yes]`** — start or stop the schedule. Requires owner/admin, and `enable` requires configured checks. **Shipping the file does not start anything**; this command does. `disable` keeps definitions and history readable.
 -   **Errors:** the org capability being off is a `404` with `APPLICATION_CHECKS_DISABLED` (exit 4). If a user says "I added the file and nothing happens", check the org capability first and the per-app `enable` second.
 -   **Example:** `dibbla apps checks run myapp --check home-page` — **CI:** `dibbla apps checks run myapp --quiet || exit $?`
+
+#### `apps maintenance`
+
+Inspect, enable and run an app's **maintenance agent** — an opt-in overnight look at logs, source and check history. It never deploys on its own. The alias is always positional.
+
+-   **`apps maintenance status <alias> [--json]`** — effective settings and the latest run. Org capability off is `404` with `MAINTENANCE_AGENT_NOT_FOUND` (exit **4**), not a missing alias.
+-   **`apps maintenance enable|disable <alias> [--yes]`** — per-app switch. Requires owner/admin. Shipping code does not start anything; this command does.
+-   **`apps maintenance run <alias> [--async|--follow] [--quiet|--json] [--mode nightly|check-triage] [--check-run <id>] [--idempotency-key <key>]`** — start one run. **Product exits:** `0` found_nothing/proposed/budget_exhausted/skipped/cancelled, `11` finding_recorded. Transport keeps `1/3/4/5/6/7`. `--follow --json` is NDJSON with exactly one terminal `summary`. Reusing `--idempotency-key` replays the original execution.
+-   **`apps maintenance runs <alias> [--limit N] [--json]`** — history, newest first, with summary/fingerprint/proposal when present.
+-   **Example:** `dibbla apps maintenance run myapp --follow --json`
+
+#### `apps proposals`
+
+List, inspect and decide the app's **change queue**. Eligibility is the API `decision` object — the CLI never computes who may approve. The maintenance author cannot approve its own proposal.
+
+-   **`apps proposals list <alias> [--json]`** — empty queue is exit 0.
+-   **`apps proposals show <alias> <proposal-id> [--diff] [--json]`** — `--diff --json` is one `type: proposal_review` document with unmodified `proposal` and `diff` API objects.
+-   **`apps proposals approve|deny|retry <alias> <proposal-id> [--yes]`** — POST to the server-owned decision endpoint. Typed conflict (e.g. `PROPOSAL_NOT_READY`) is exit 6.
+-   **Example:** `dibbla apps proposals show myapp pr_0123456789abcdef0123 --diff --json`
 
 #### `dibbla-checks.yaml` (the file those commands operate on)
 
@@ -380,7 +430,7 @@ The `deploy` command deploys a project to the Dibbla platform. **Detection is by
 -   **Flags:**
     -   `--alias`, `-a`: Custom alias name (default: directory name).
     -   `--message`, `-m`: **Required for agents.** Deploy message used as the VCS commit subject in the app's Dibbla-managed git history (and on the GitHub mirror, if configured). Treat it like a git commit subject: present-tense imperative, under ~72 chars, covering what changed and why. Max 500 chars. Examples: `-m "fix: handle null org in /api/me"`, `-m "feat: add nightly db backup workflow"`, `-m "chore: bump node to 20.14"`. For retries/mechanical redeploys still say so: `-m "redeploy: retry after CF 524"`. Never omit `-m` — a blank deploy history is a bug, not a default.
-    -   `--force`, `-f`: Force a redeployment if an application with the same alias already exists (causes downtime).
+    -   `--force`, `-f`: Recreate the deployment after a successful build if the alias already exists (brief restart while the new pod starts). The existing app is replaced only once the new image is built and pushed; a failed build leaves it running untouched and returns `BUILD_FAILED`.
     -   `--update`, `-u`: Rolling update of existing deployment (zero downtime). Mutually exclusive with `--force`.
     -   `--env`, `-e`: Set environment variable KEY=value (repeatable, Docker-style).
     -   `--cpu <value>`: CPU request (e.g. `500m`). **Ignored under multi-service** — set CPU per service in `dibbla.yaml`.
@@ -575,6 +625,45 @@ Three read-only endpoints expose the same data surfaced by the console's Version
 -   `GET /api/deploy/deployments/<app>/vcs/commits/<sha>` — commit detail with the file list at that tree.
 
 Prefer `dibbla clone` over shelling out to `git clone` by hand — it resolves the canonical clone URL via `/vcs/info`, so it keeps working if the git host moves.
+
+## Working through `/platform` instead of the CLI
+
+The same platform is reachable over MCP at the OAuth-protected `/platform`
+endpoint. The rule binding the two surfaces: **what a signed-in human can do
+with the `dibbla` CLI, an OAuth grant with the right scope can do through
+`/platform`.** Connect a client with `dibbla mcp platform`, and deploying,
+restarting, configuring, setting secrets, provisioning databases and buckets,
+applying workflows, running checks and deleting are tool calls rather than shell
+commands.
+
+Three things to know before looking for a tool:
+
+- **Parity is measured in capabilities, not in tools.** Several commands map to
+  one capability, and — more often — one tool delivers several capabilities. A
+  full write grant lists **30 tools** for the whole platform, so do not expect a
+  tool per command. Every destructive operation is still a read-only *plan*
+  followed by an *execute* that carries a human's approval.
+- **A tool is a flow, and the step is a parameter.** `platform_apps` lists your
+  apps when you omit `alias` and reads one when you name it; `platform_operation`
+  takes a `view` of `status`, `events`, `logs` or `output`;
+  `platform_files` takes an `action`; `platform_destructive_plan` takes
+  the `resource` to destroy. If you cannot find a tool for something, look for
+  the parameter on the tool that owns the flow — see
+  `.claude/skills/dibbla/platform.md` § 13 for the map.
+- **What is not remote is written down.** The exceptions are `local-only` rows in
+  the platform capability contract, each with a technical reason: building the
+  deploy archive, running a local pipeline, revealing a credential in plaintext,
+  reading a `.env` file, dumping a database through the caller's `pg_dump`,
+  cloning to disk, scaffolding files, the keyring, the local context and org
+  selection, updating the binary. See `.claude/skills/dibbla/platform.md` § 13
+  for the full table, and
+  <https://docs.dibbla.com/reference/platform-contract> for the authoritative
+  one.
+
+The rule is enforced rather than described: `dibbla-cli` fails its own build when
+a command has no capability row, and `app-hosting-service` fails its own when a
+row names a tool that is not in `tools/list` — or when the surface grows past
+its 30-tool budget.
 
 ## Pre-deploy guardrails
 

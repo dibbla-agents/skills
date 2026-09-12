@@ -225,7 +225,7 @@ dibbla deploy ./ --cpu 500m --memory 512Mi -e NODE_ENV=production
 
 # Deploy with login guard
 dibbla deploy --alias my-app --require-login
-dibbla deploy --alias my-app --require-login --access-policy invite_only
+dibbla deploy --alias my-app --require-login --access-policy invite_only   # then invite people in the console: Access & users → Invite by email (app access only, no org membership)
 dibbla deploy --alias my-app --require-login --google-scopes https://www.googleapis.com/auth/drive.readonly
 ```
 
@@ -240,7 +240,7 @@ Recovery:
 1. Wait 2–5 minutes for the backend build to finish.
 2. Run `dibbla apps list` and look for the alias.
 3. If it appears with `running` status, the deploy succeeded — you are done.
-4. If the alias does not appear after ~10 minutes, retry with `dibbla deploy --update` (rolling, zero downtime if the previous attempt did quietly succeed). Avoid `--force`, which causes downtime if the deploy actually worked.
+4. If the alias does not appear after ~10 minutes, retry with `dibbla deploy --update` (rolling, zero downtime if the previous attempt did quietly succeed). Avoid `--force`, which recreates the deployment (brief restart) if the deploy actually worked.
 
 ---
 
@@ -521,6 +521,28 @@ dibbla apps checks disable myapp --yes              # turn it off, keep definiti
 ```
 
 The exit code **is** the product outcome (0/8/9/10/12/13), so a CI step fails exactly when the app fails its own assertions — no output scraping. Transport problems keep the CLI-wide codes (3 auth, 4 not found, 5 bad request, 6 conflict, 7 timeout, 1 other).
+
+### Operate the maintenance agent and review a proposal
+
+```bash
+dibbla apps maintenance status myapp --json
+dibbla apps maintenance enable myapp --yes
+dibbla apps maintenance run myapp --follow --json \
+  | jq -c 'select(.type=="summary")'          # outcome + exit_code; 0 calm, 11 finding
+dibbla apps maintenance run myapp --async --idempotency-key nightly-2026-09-01
+dibbla apps maintenance runs myapp --limit 10 --json
+
+dibbla apps proposals list myapp --json
+dibbla apps proposals show myapp pr_0123456789abcdef0123 --diff --json
+dibbla apps proposals approve myapp pr_0123456789abcdef0123 --yes
+dibbla apps proposals deny myapp pr_0123456789abcdef0123 --yes
+```
+
+A `404` with `MAINTENANCE_AGENT_NOT_FOUND` (exit 4) means the organization is
+not switched on — not a missing alias. Reusing `--idempotency-key` follows the
+original execution; it does not start a second run. The CLI never computes who
+may approve: `show` prints the server `decision` object, and the author of a
+maintenance proposal cannot approve it.
 
 ### Tail logs for the whole deployment (all services merged)
 

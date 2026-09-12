@@ -809,6 +809,7 @@ Rules:
 - Job names follow service-name regex (`^[a-z][a-z0-9-]{0,29}$`) and share namespace with services — a job and a service can't have the same name.
 - History limits default to K8s defaults (`3` successful, `1` failed). Override per-job for noisy crons.
 - A cron-only deploy (no `services:`) is allowed if `--no-public` is passed; otherwise the validator rejects it (`PUBLIC_SERVICE_MISSING`).
+- **Nothing notifies anyone when a cron job fails.** A `jobs:` entry is a plain K8s CronJob: no run history beyond the pod's, no alert, no recovery notice. If the user wants "a nightly job that tells me when it breaks", that is a **pipeline**, not this — see [pipelines.md](pipelines.md).
 
 ---
 
@@ -926,6 +927,7 @@ Error codes (subset — full set in `reference.md`):
 | `PUBLIC_MISSING_PORT` | A `public: true` service has no `port:` |
 | `QUOTA_EXCEEDED` | Resolved set exceeds an org quota (services, replicas, CPU, memory, PVC size) |
 | `BUILD_FAILED` | A build step failed (missing build secret, Dockerfile error, …) |
+| `REGISTRY_UNAVAILABLE` / `BUILD_SERVICE_UNAVAILABLE` | Dibbla's registry or build service was down during the build (503, exit `20`). Nothing to change; the running app was not touched — retry later |
 | `DEPLOY_IN_PROGRESS` | Another deploy is in-flight for this alias; wait or cancel |
 | `PATCH_AMBIGUOUS` | `dibbla apps update --replicas N` against a multi-service deploy |
 | `ALIAS_HOSTNAME_COLLISION` | A multi-public deploy would produce a hostname `<alias>-<service>.<base>` that another existing alias in your org already owns. Rename either deploy. |
@@ -1236,8 +1238,8 @@ API to create the grant it names, and nothing resolves the name at run time
 (verified 2026-08-26 — the field appears in the loader's validation and the
 classification derivation and nowhere else). That is the smaller of two problems.
 
-**Only `http_sequence` executes at all.** `core/go-toolserver/functions/applicationchecks/function.go:270`
-returns outcome `indeterminate` with code `CHECK_KIND_UNSUPPORTED` for every
+**Only `http_sequence` executes at all.** The check runner returns outcome
+`indeterminate` with code `CHECK_KIND_UNSUPPORTED` for every
 other kind — `browser_journey` (read-only or not), `semantic` and `composite`
 alike. They still pass validation and deploy green, so nothing warns the user.
 The outcome is neither pass nor fail, which reads as "all clear" more easily

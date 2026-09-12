@@ -477,7 +477,7 @@ The same applies to Python (`pip install -r requirements.txt` rather than shippi
 | **Arguments** | `path` (optional) — directory to deploy; default `.` |
 | **Flags** | `--alias`, `-a` — custom alias name (default: directory name) |
 | | `--message`, `-m` — Deploy message, used verbatim as the VCS commit subject (local bare repo and GitHub mirror). Max 500 chars; API returns 400 if exceeded. **Agents must always pass this** — treat it like a git commit subject (imperative mood, ≤72 chars). |
-|| | `--force`, `-f` — force redeploy if alias exists (causes downtime) |
+|| | `--force`, `-f` — recreate the deployment after a successful build if the alias exists (brief restart; a failed build leaves the running app untouched) |
 | | `--update`, `-u` — rolling update of existing deployment (zero downtime) |
 | | `--env`, `-e` — env var `KEY=value` (repeatable) |
 | | `--env-file <path>` — bulk-load env vars from a `.env`-style file. The file is the base layer; `-e` flags override individual keys (file < `-e`, same precedence as `dibbla run`). Keep the file **outside** the deploy directory (a `.env` in the deploy root is a guardrail blocker). |
@@ -517,6 +517,8 @@ For the manifest schema, env-aware fields, profiles, service discovery, NetworkP
 | `PUBLIC_MISSING_PORT` | A `public: true` service has no `port:` | Add `port:` |
 | `QUOTA_EXCEEDED` | Resolved set exceeds an org quota | Trim `replicas` / `cpu` / `memory` / `volumes`, or talk to the platform operator |
 | `BUILD_FAILED` | A build step failed | Check the deploy event log; if it's a missing build secret, run `dibbla secrets set <NAME> <value> -d <alias>` first |
+| `REGISTRY_UNAVAILABLE` | Dibbla's container registry answered 5xx, ran out of disk or did not answer while the image was pushed (HTTP 503, exit `20`) | Platform fault: change nothing, the running app was not touched. Retry in a few minutes; escalate to Dibbla support if it persists |
+| `BUILD_SERVICE_UNAVAILABLE` | Dibbla's build service (BuildKit) could not be reached (HTTP 503, exit `20`) | Same as `REGISTRY_UNAVAILABLE` |
 | `DEPLOY_IN_PROGRESS` | Another deploy is in-flight for this alias | Wait or `dibbla apps cancel <alias>` |
 | `PATCH_AMBIGUOUS` | `dibbla apps update --replicas N` against a multi-service deploy | Edit `dibbla.yaml` and redeploy with `--update` |
 | `ALIAS_HOSTNAME_COLLISION` | Multi-public deploy would produce a hostname `<alias>-<service>.<base>` that another existing alias in the org owns | Rename either deploy |
@@ -646,6 +648,49 @@ dibbla apps restart myapp -s web --quiet
 dibbla apps restart myapp -s redis --json
 ```
 
+### apps releases
+
+List the app's saved releases: one immutable image per successful deploy (`dep_…` id), newest first.
+
+| Item | Details |
+|------|---------|
+| **Usage** | `dibbla apps releases <alias>` |
+| **Arguments** | `alias` (required) — deployment alias |
+| **Flags** | `--json` — print the raw API document verbatim |
+| **Output** | Table: `RELEASE`, `DEPLOYED`, `DIGEST` (12 hex), `STATE` (`running`, `available`, `gone`; `+config` when port/env/resources are saved), `AUTHOR`. Ends with the rollback commands. A missing deployment is called out with the `--to <dep-id>` recreate hint. |
+| **Errors** | `404 NOT_FOUND` — neither a deployment nor a saved release exists for the alias in your organization |
+| **Exit codes** | `0` ok · `4` not found · `5` bad alias (no request made) · `3` auth · `1` other |
+
+**Examples:**
+```bash
+dibbla apps releases myapp
+dibbla apps releases myapp --json | jq '.previous_deployment_id'
+```
+
+### apps rollback
+
+Switch the app to an earlier release's image **without a build**: a rolling update to an image that is already in the registry. Works while BuildKit or registry writes are broken. Env, resources and login gate are inherited from the running app; secrets are untouched. With the deployment missing (a `--force` deploy removed it and the build failed) the deployment is recreated from the release's image with the saved configuration.
+
+| Item | Details |
+|------|---------|
+| **Usage** | `dibbla apps rollback <alias> [--to <dep-id>] [-y] [--json]` |
+| **Arguments** | `alias` (required) — deployment alias |
+| **Flags** | `--to <dep-id>` — release to roll back to; default: the previous release (newest not running) |
+| | `-y`, `--yes` — skip the confirmation prompt |
+| | `--json` — print the JSON response body verbatim |
+| **Output** | `✅ <alias> rolled back to <dep-id> (no build)` with the previous release and the image; `recreated from release <dep-id>` when the deployment was rebuilt; `already runs <dep-id>` when `--to` names the running release. |
+| **Errors** | `RELEASE_GONE` (410) — swept by retention; the message lists the releases still available. `RELEASE_NOT_FOUND` (404) — not a release of this app / no previous release. `RELEASE_CONFIG_UNKNOWN` (409) — deployment gone and no saved config: `dibbla deploy`. `ROLLBACK_UNSUPPORTED` (409) — multi-service or stateful app: redeploy the earlier source. |
+| **Exit codes** | `0` ok · `4` not found · `5` bad alias / bad `--to` / no terminal without `-y` (no request made) · `6` conflict · `1` other (incl. 410) |
+| **Rule** | The image is verified in the registry before the running app is touched — a failed rollback leaves the app as it was. |
+| **Non-interactive** | Pass `-y`; without a terminal the confirmation cannot be shown and the command refuses with exit 5. |
+
+**Examples:**
+```bash
+dibbla apps rollback myapp -y                   # previous release
+dibbla apps rollback myapp --to dep_k3f9a -y    # a specific release
+dibbla apps rollback myapp --json -y
+```
+
 ### apps get
 
 Show one deployment's record. This is the command `logs --pod-stream` 404s point at ("check `dibbla apps get <alias>`") to see which services exist.
@@ -723,6 +768,94 @@ dibbla apps checks run myapp --follow --json | jq -c 'select(.type=="summary")'
 | **Output** | `✓ application checks enabled for <alias> (settings version N)` |
 | **Errors** | Version conflict on concurrent edits is 409 → exit 6 |
 | **Non-interactive** | Without a terminal on stdin and without `--yes`, the command **refuses**: exit 5, zero requests, message naming `--yes`. It does not silently cancel — a script that was never asked must not be told the work succeeded. Scripts, CI and coding agents should always pass `--yes`. |
+
+---
+
+## apps maintenance
+
+Operate an app's maintenance agent. Alias is always positional. The runtime
+model — two switches, shared token pool, typed outcomes, four-eyes — is
+[platform.md § 8.8](platform.md).
+
+**Exit codes are the product outcome.** `run` exits 0 for
+found_nothing/proposed/budget_exhausted/skipped/cancelled, 11 for
+finding_recorded, 1 for run_error/assessment_blocked/unknown_outcome. Transport
+keeps 3 auth, 4 not found (`MAINTENANCE_AGENT_NOT_FOUND` included — not "unknown
+alias"), 5 validation, 6 conflict, 7 timeout.
+
+### apps maintenance status
+
+| Item | Details |
+|------|---------|
+| **Usage** | `dibbla apps maintenance status <alias>` |
+| **Flags** | `--json` — print the raw API document (unknown fields preserved) |
+| **Output** | enabled/disabled, deployment id, model, overnight cadence, last run id/status/terminal code |
+
+### apps maintenance enable / disable
+
+| Item | Details |
+|------|---------|
+| **Usage** | `dibbla apps maintenance enable <alias>` / `dibbla apps maintenance disable <alias>` |
+| **Flags** | `-y`, `--yes` — skip confirmation. `--json` — raw acknowledgement |
+| **Requires** | owner/admin. The write carries the server's `app_version` |
+| **Errors** | org off → 404 `MAINTENANCE_AGENT_NOT_FOUND` exit 4. Concurrent edit → 409 exit 6 |
+| **Non-interactive** | Without a TTY and without `--yes`: exit 5, zero requests |
+
+### apps maintenance run
+
+| Item | Details |
+|------|---------|
+| **Usage** | `dibbla apps maintenance run <alias>` |
+| **Flags** | `--async` \| `--follow` — mutually exclusive. `-q`/`--quiet` \| `--json` — mutually exclusive. `--mode nightly\|check-triage` (default nightly). `--check-run <id>` required for check-triage, rejected on nightly. `--idempotency-key <key>` — reuse to replay the same execution |
+| **Output** | Default: poll to terminal, print outcome + summary/fingerprint/proposal. `--follow --json`: NDJSON with `execution_created`, `execution_status` lines, exactly one terminal `summary` carrying `outcome` + `exit_code`. Sync `--json`: one document with those fields next to `execution` |
+| **Replay** | Same key → `replayed: true`, original execution_id, no second spend |
+
+**Examples:**
+```bash
+dibbla apps maintenance run myapp --follow --json | jq -c 'select(.type=="summary")'
+dibbla apps maintenance run myapp --async --idempotency-key nightly-2026-09-01
+```
+
+### apps maintenance runs
+
+| Item | Details |
+|------|---------|
+| **Usage** | `dibbla apps maintenance runs <alias>` |
+| **Flags** | `--limit <N>` 1–100 (default 25; out of range exit 5). `--json` — raw API page |
+
+---
+
+## apps proposals
+
+Review and decide deployment proposals. Approval eligibility is **never**
+derived by the CLI: `show` renders the API `decision` object;
+approve/deny/retry post to the server-owned endpoint.
+
+### apps proposals list
+
+| Item | Details |
+|------|---------|
+| **Usage** | `dibbla apps proposals list <alias>` |
+| **Flags** | `--json` — raw API document |
+| **Notes** | Empty queue is exit 0 |
+
+### apps proposals show
+
+| Item | Details |
+|------|---------|
+| **Usage** | `dibbla apps proposals show <alias> <proposal-id>` |
+| **Flags** | `--diff` — include the exact server-generated diff and evidence. `--json` |
+| **JSON** | `--json` alone: proposal API document. `--diff --json`: `{"schema_version":1,"type":"proposal_review","proposal":{…},"diff":{…}}` with unmodified API objects |
+| **Validation** | proposal id must match `pr_[a-zA-Z0-9_-]{1,128}` (exit 5, zero requests) |
+
+### apps proposals approve / deny / retry
+
+| Item | Details |
+|------|---------|
+| **Usage** | `dibbla apps proposals approve\|deny\|retry <alias> <proposal-id>` |
+| **Flags** | `-y`, `--yes`. `--json` — proposal document after the decision |
+| **Errors** | typed conflict e.g. `PROPOSAL_NOT_READY` → exit 6. Author approving own maintenance proposal is refused by the server |
+| **Non-interactive** | Without a TTY and without `--yes`: exit 5, zero requests |
 
 ---
 
@@ -1412,6 +1545,51 @@ Alias: `fn`.
 
 **Agent guidance:** since the field-types fix, `fn get` is the **trusted source of truth** for input/output types. Older cached output (or pre-fix workflow YAML files saved to disk) may report everything as `string`; treat post-fix `fn get` as authoritative, and reach for the function source at `go-toolserver/functions/<name>/function.go` if `fn get` and a workflow's hardcoded type still disagree. Mismatched types fail at runtime with `cannot unmarshal X into Go struct field Inputs.Y of type Z`.
 
+
+### functions exposed
+
+| Item | Details |
+|------|---------|
+| **Usage** | `dibbla functions exposed` |
+| **Output** | Table: NAME, SERVER, MIN ROLE, ENABLED, REGISTERED (default); JSON/YAML with `-o` |
+| **Behavior** | Lists the organization's function exposures — the functions members can call as tools on the `/platform/tools` MCP connector. REGISTERED `false` means the function's worker is not connected right now; the exposure stays and the tool is offered again when it registers. |
+
+### functions expose
+
+| Item | Details |
+|------|---------|
+| **Usage** | `dibbla functions expose <server> <name> [--min-role viewer\|developer\|admin\|owner] [--disabled]` |
+| **Arguments** | `server` (required), `name` (required) — a function currently in `functions list` |
+| **Flags** | `--min-role` — lowest organization role that may call the tool (default `viewer`, i.e. any member; there is no `member` role) |
+| | `--disabled` — record the exposure but do not offer the tool yet |
+| **Role** | admin or owner (enforced server-side) |
+| **Behavior** | Upsert: running it again on an exposed function updates its min role and enabled state. Prints the resulting exposure. Refusals: `_`-prefixed and `data_source_*` functions cannot be exposed (400); an unregistered function is 404; the 101st enabled exposure is refused (409 `EXPOSURE_LIMIT`, exit 6) — unexpose one first. |
+
+### functions unexpose
+
+| Item | Details |
+|------|---------|
+| **Usage** | `dibbla functions unexpose <server> <name> [-y]` |
+| **Role** | admin or owner |
+| **Behavior** | Removes the exposure; members lose the tool at their next tool listing. Recorded invocations are kept. Prompts unless `--yes`. To hide the tool without forgetting the policy, use `expose … --disabled` instead. |
+
+### functions invocations
+
+| Item | Details |
+|------|---------|
+| **Usage** | `dibbla functions invocations [--server <s>] [--function <name>] [--source mcp\|api\|cli] [--user <id>] [--since <RFC3339\|unix>] [-n <N>]` |
+| **Output** | Table: ID, WHEN, FUNCTION (`server/name`), SOURCE, USER, STATUS, DURATION, ERROR (default, newest first); JSON/YAML with `-o` |
+| **Behavior** | Every call to an exposed function — through the MCP connector or the API — is recorded as a **tool invocation**, a sibling of a workflow run that never appears in `wf runs list`. ERROR shows the failure summary, or the error code when there is none. |
+
+### functions invocation
+
+| Item | Details |
+|------|---------|
+| **Usage** | `dibbla functions invocation <id> [--logs]` |
+| **Output** | YAML (default) or JSON with `-o json`: caller, source, status, duration, input/output sizes and digests, result preview |
+| **Flags** | `--logs` — also print the log lines the function emitted during the call, in the same format as `dibbla wf logs` |
+
+**Agent guidance:** exposing is a policy decision for an admin, not a step in workflow authoring — a function does not need to be exposed to be used in a workflow. Reach for `fn exposed` / `fn invocations` when someone asks "which of our functions can agents call directly" or "who called this tool, and what happened".
 ---
 
 ---
@@ -1445,6 +1623,8 @@ Alias: `fn`.
 | Apps | `dibbla apps list` | List deployments |
 | Apps | `dibbla apps update <alias> ...` | Update env, replicas, cpu, memory, port, login guard |
 | Apps | `dibbla apps delete <alias>` | Delete deployment |
+| Apps | `dibbla apps maintenance status\|enable\|run\|runs <alias>` | Maintenance agent |
+| Apps | `dibbla apps proposals list\|show\|approve\|deny\|retry` | Change queue |
 | Db | `dibbla db list [-q]` | List databases |
 | Db | `dibbla db create [name]` | Create database |
 | Db | `dibbla db delete <name>` | Delete database |
@@ -1478,3 +1658,8 @@ Alias: `fn`.
 | Revisions | `dibbla revisions restore <wf> <id>` | Restore revision |
 | Functions | `dibbla functions list` | List available functions |
 | Functions | `dibbla functions get <server> <name>` | Get function details |
+| Functions | `dibbla functions exposed` | List functions exposed as MCP tools |
+| Functions | `dibbla functions expose <server> <name> [--min-role <role>] [--disabled]` | Expose a function as an MCP tool (admin) |
+| Functions | `dibbla functions unexpose <server> <name> [-y]` | Stop exposing a function (admin) |
+| Functions | `dibbla functions invocations [filters]` | List calls made to exposed functions |
+| Functions | `dibbla functions invocation <id> [--logs]` | Show one call, optionally with its logs |
