@@ -547,12 +547,12 @@ Clone the Dibbla-managed git repo of a deployed app. Every `dibbla deploy` write
 | | `--into <dir>` — destination directory (default: `./<app>`, derived from the clone URL). The directory must not exist; `git clone` refuses otherwise. |
 | **Behavior** | 1. Requires a token (`dibbla login` or `DIBBLA_API_TOKEN`) — the same one `deploy` uses; there is no separate clone credential. 2. Resolves the canonical clone URL with `GET /api/deploy/deployments/<app>/vcs/info` (also returns default branch, latest commit and `running_sha`). 3. Shells out to `git -c http.extraHeader="Authorization: Bearer <token>" clone --quiet <url> <dir>` — the token lives only in that process's config, never in `.git/config`, the remote URL or `~/.git-credentials`. 4. `git checkout <ref>` when `--ref` is given. |
 | **Requires** | `git` on `PATH` (the CLI does not bundle it). |
-| **Read-only** | **Push is rejected** — the platform answers `403 push is not permitted; use the deploy pipeline` to `git push`. The repo is append-only from deploys: the only way to add a commit is `dibbla deploy … --update`. You may commit locally as much as you like; those commits stay on your machine. To share code with other people, add a GitHub/GitLab remote and push there. |
+| **Delivering changes** | `dibbla deploy . --alias <app> -m "…" --update` from the clone directory — the repo is written by deploys, and that is the app's version history. `git push` is answered with `403 push is not permitted; use the deploy pipeline` **by design**; do not try it, and do not answer the 403 by proposing a GitHub/GitLab remote — Dibbla already holds the history, and the org's GitHub mirror (if any) is filled by deploys. You may commit locally as much as you like; those commits stay on your machine and are not the delivery step. |
 | **What is in the clone** | Exactly the files the deploy uploaded, minus the server-side VCS filter (`.env`, `.env.*`, `node_modules/`, `dist/`, `.venv/`, `.git/`, `*.pem`, `*.key`, plus anything in `.dibblaignore`). So: no secrets or env files — they live on the platform (`dibbla secrets`, `apps update -e`) and are already attached to the app; the next `deploy --update` keeps them. No original git history either: the commits are Dibbla's deploy commits, not the ones from the source repo the app was first deployed from. |
 | **What is NOT in the clone** | Anything that was never deployed: uncommitted or undeployed edits on the machine that last deployed, local branches, build outputs. Sync between machines happens **through deploys only** — if machine A has changes that matter, deploy them from A before cloning on B. |
 | **Output** | `✅ Cloned to <dir>` followed by `latest: <short-sha>  <subject>` (or `checked out <ref>`). With no deploy-written commits yet: `⚠️ Nothing to clone: the app has no deploy-written commits yet.` (exit 0). |
 | **Errors** | Not logged in → `API token is required. Run 'dibbla login' or set DIBBLA_API_TOKEN.` (exit 1). Token rejected → `Authentication failed. Your token may be invalid or expired. Try 'dibbla login' again.` App not in the active org, or version control disabled for the environment → `App not found in your org, or version control is not enabled for this environment.` (404 — check `dibbla org list` / `dibbla apps list` first; a wrong organization looks like a missing app). `git` missing → the preflight names the tool and how to install it. Destination exists → git's own `destination path '<dir>' already exists`. |
-| **When to use** | The code is not on this machine and its only copy is what is deployed (typical: an agent continues work from another laptop, a CI box or a sandbox). **Prefer a normal `git clone` from GitHub/GitLab** when the app's source lives there — that repo has the real history, branches and collaborators; the Dibbla repo is a deploy log, not a source of truth for collaboration. |
+| **When to use** | The code is not on this machine and its only copy is what is deployed (typical: an agent continues work from another laptop, a CI box or a sandbox). If the team already keeps the source on GitHub/GitLab, clone from there and use `dibbla clone` to inspect what is running — but never set up GitHub just to save or share a Dibbla app. |
 
 **Version control API** (same data, for scripting): `GET /api/deploy/deployments/<app>/vcs/info`, `…/vcs/commits?limit=<n>&before=<sha>` (newest first, `deploy_id` per commit), `…/vcs/commits/<sha>` (file list at that tree). `Authorization: Bearer $DIBBLA_API_TOKEN`. Prefer `dibbla clone` over a hand-written `git clone` — it resolves the URL via `/vcs/info`, so it keeps working if the git host moves.
 
@@ -1649,8 +1649,8 @@ Alias: `fn`.
 | Item | Details |
 |------|---------|
 | **Usage** | `dibbla functions exposed` |
-| **Output** | Table: NAME, SERVER, MIN ROLE, ENABLED, REGISTERED (default); JSON/YAML with `-o` |
-| **Behavior** | Lists the organization's function exposures — the functions members can call as tools on the `/platform/tools` MCP connector. REGISTERED `false` means the function's worker is not connected right now; the exposure stays and the tool is offered again when it registers. |
+| **Output** | Table: NAME, SERVER, MIN ROLE, ENABLED, REGISTERED, EXPOSABLE (default); JSON/YAML with `-o` |
+| **Behavior** | Lists the organization's function exposures — the functions members (and their agents) can call directly: as `platform_tools` on the Dibbla MCP connector, with `dibbla fn invoke`, or over the API. REGISTERED `false` means the function's worker is not connected right now; the exposure stays and the tool is offered again when it registers. EXPOSABLE `false` on a registered function means it is not available as a tool (agents and platform-internal functions): nothing can call it, and `dibbla fn unexpose` removes the row. `-` means the server did not say. |
 
 ### functions expose
 
@@ -1661,7 +1661,7 @@ Alias: `fn`.
 | **Flags** | `--min-role` — lowest organization role that may call the tool (default `viewer`, i.e. any member; there is no `member` role) |
 | | `--disabled` — record the exposure but do not offer the tool yet |
 | **Role** | admin or owner (enforced server-side) |
-| **Behavior** | Upsert: running it again on an exposed function updates its min role and enabled state. Prints the resulting exposure. Refusals: `_`-prefixed and `data_source_*` functions cannot be exposed (400); an unregistered function is 404; the 101st enabled exposure is refused (409 `EXPOSURE_LIMIT`, exit 6) — unexpose one first. |
+| **Behavior** | Upsert: running it again on an exposed function updates its min role and enabled state. Prints the resulting exposure. Refusals: a function that is not available as a tool — agents, and platform built-ins that are not opted in for direct calls — cannot be exposed (400); your organization's own non-agent functions can; an unregistered function is 404; the 101st enabled exposure is refused (409 `EXPOSURE_LIMIT`, exit 6) — unexpose one first. |
 
 ### functions unexpose
 
@@ -1686,6 +1686,16 @@ Alias: `fn`.
 | **Usage** | `dibbla functions invocation <id> [--logs]` |
 | **Output** | YAML (default) or JSON with `-o json`: caller, source, status, duration, input/output sizes and digests, result preview |
 | **Flags** | `--logs` — also print the log lines the function emitted during the call, in the same format as `dibbla wf logs` |
+
+### functions invoke
+
+| Item | Details |
+|------|---------|
+| **Usage** | `dibbla functions invoke <server> <name> [--input '<json object>' \| -f <file\|->]` |
+| **Arguments** | `server`, `name` — an exposed function from `functions exposed` |
+| **Flags** | `--input` — the function's inputs as a JSON object; `-f` reads the same JSON from a file, `-` for stdin. Neither means `{}`. |
+| **Output** | YAML (default) or JSON with `-o json`: `invocation_id`, `status`, `duration_ms` and the function's `result` |
+| **Behavior** | Calls the function directly, outside any workflow, synchronously (the engine waits up to 30 s) and records a tool invocation with source `cli`. Same endpoint and body as the connector's `platform_tools action=invoke`. Refusals: not registered / not exposed / disabled are one 404 (exit 4) on purpose; a min role above yours is 403 (exit 3); a function that fails is 502 with its error, recorded in the ledger (`fn invocation <id> --logs`); a timeout is 504 and the invocation is recorded as timed out; inputs over 64 KiB are 400. |
 
 **Agent guidance:** exposing is a policy decision for an admin, not a step in workflow authoring — a function does not need to be exposed to be used in a workflow. Reach for `fn exposed` / `fn invocations` when someone asks "which of our functions can agents call directly" or "who called this tool, and what happened".
 ---
@@ -1718,7 +1728,7 @@ Alias: `fn`.
 | Feedback | `dibbla feedback list` | List feedback |
 | Feedback | `dibbla feedback delete <id>` | Delete feedback |
 | Deploy | `dibbla deploy [path]` | Deploy app from directory |
-| Clone | `dibbla clone <app> [--ref <sha>] [--into <dir>]` | Clone the deploy history of an app (read-only; sync happens via `deploy --update`) |
+| Clone | `dibbla clone <app> [--ref <sha>] [--into <dir>]` | Clone the deploy history of an app (changes go back via `deploy --update`, never `git push`) |
 | Apps | `dibbla apps list` | List deployments |
 | Apps | `dibbla apps update <alias> ...` | Update env, replicas, cpu, memory, port, login guard |
 | Apps | `dibbla apps delete <alias>` | Delete deployment |
@@ -1762,3 +1772,4 @@ Alias: `fn`.
 | Functions | `dibbla functions unexpose <server> <name> [-y]` | Stop exposing a function (admin) |
 | Functions | `dibbla functions invocations [filters]` | List calls made to exposed functions |
 | Functions | `dibbla functions invocation <id> [--logs]` | Show one call, optionally with its logs |
+| Functions | `dibbla functions invoke <server> <name> [--input <json> \| -f <file>]` | Call an exposed function directly (source `cli`) |
