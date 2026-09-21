@@ -386,7 +386,7 @@ When the deploy archive arrives at the backend, a second filter decides which fi
 |------|---------|
 | **Location** | `.dibblaignore` at the root of the deploy directory (same level as `Dockerfile`). The file itself is committed to VCS — keep it under version control. |
 | **Syntax** | gitignore-style globs (powered by `sabhiram/go-gitignore`). Supports `**`, directory suffixes (`build/`), negation, etc. Example: `build/`, `**/*.log`, `coverage/`, `*.tmp`. |
-| **Platform denylist (always-on)** | `node_modules/`, `dist/`, `.venv/`, `.git/`, `.env`, `.env.*`, `*.pem`, `*.key`. These are **always** filtered from VCS regardless of `.dibblaignore`, and each hit produces a warning returned in the deploy response under `vcs_filtered`. The CLI surfaces these as a recommendation to add the path to `.dibblaignore` to silence the warning. |
+| **Platform denylist (always-on)** | `node_modules/`, `dist/`, `.venv/`, `.git/`, `.env`, `.env.*`, `*.pem`, `*.key`. These are **always** filtered from VCS regardless of `.dibblaignore`, and each hit produces a warning returned in the deploy response under `vcs_filtered`. The CLI surfaces these as a recommendation to add the path to `.dibblaignore` to silence the warning. **Two exceptions:** `.env.example` and `.env.sample` (exact names) are kept — they carry the *names* of the variables the app needs, never values, and a `dibbla clone` must bring that list along. The pre-receive hook on `git push` applies the same list: a pushed `.env`/`.env.local`/`.env.*` is refused with a message saying secrets belong in `dibbla secrets` and the file in `.gitignore`; `.env.example`/`.env.sample` pass. |
 | **Suppressing warnings** | Add a path that hits the platform denylist (e.g. `.env`) to `.dibblaignore` and the warning goes away — same file is still excluded from VCS, but silently. User-ignored entries are checked **before** the platform denylist, so `.dibblaignore` always wins on the warning channel. |
 | **Hard rejections** | The server enforces per-file and per-commit size caps. If any file exceeds the per-file cap, or the kept set exceeds the total cap, the **entire deploy fails** with `ErrCodeVCSFiltered` (HTTP 400) and a message naming the offending path. Limits are server-configured (`GitMaxFileSize`, `GitMaxCommitDelta`); typical cause is committing a generated artifact, dataset, or build output. Fix by adding the path to `.dibblaignore`. |
 | **Symlinks / non-regular files** | Skipped silently. Only regular files are committed. |
@@ -474,7 +474,7 @@ COPY --from=build /app/dist /usr/share/nginx/html
 
 The same applies to Python (`pip install -r requirements.txt` rather than shipping `.venv/`) and to Next.js (`npm run build` rather than shipping `.next/`).
 
-**Pre-deploy check:** `guardrails.md` Check 9 catches this before a deploy is attempted.
+**Pre-deploy check:** `guardrails.md` Check 10 catches this before a deploy is attempted.
 
 ### Flags
 
@@ -563,6 +563,24 @@ Connect a local folder to the Dibbla-managed git repo of a deployed app. Every `
 | **When to use** | The code is not on this machine and its only copy is what is deployed (an agent continues work from another laptop, a CI box or a sandbox); or the agent already made a folder/repo and the user says "work on <app> here". If the team already keeps the source on GitHub/GitLab, clone from there and use `dibbla clone` to inspect what is running — but never set up GitHub just to save or share a Dibbla app. |
 
 **Version control API** (same data, for scripting): `GET /api/deploy/deployments/<app>/vcs/info`, `…/vcs/commits?limit=<n>&before=<sha>` (newest first, `deploy_id` per commit), `…/vcs/commits/<sha>` (file list at that tree). `Authorization: Bearer $DIBBLA_API_TOKEN`. Prefer `dibbla clone` over a hand-written `git clone` — it resolves the URL via `/vcs/info`, so it keeps working if the git host moves.
+
+---
+
+## export
+
+Take everything an app keeps on Dibbla with you, in formats other tools read. One directory, no lock-in: a git repository, pg_dump archives, plain files per bucket object, dotenv files, the app's own `dibbla.yaml`, and a docker compose sketch that runs them together. This is the Data Act exit path (`dibbla-docs` → "Moving away from Dibbla"); it is also a fine offline backup.
+
+| Item | Details |
+|------|---------|
+| **Usage** | `dibbla export <alias> [--out <dir>] [--include-secrets] [--yes]` |
+| **Flags** | `--out`, `-o` — destination (default `./<alias>-export`); must not exist or be empty — nothing is ever overwritten. `--include-secrets` — write secret values in plaintext into the env files; asks `Write secret values in plain text into the export?` (default **no**). `--yes`, `-y` — answer that question for scripts; without it on a non-TTY the command refuses with exit 5 before writing anything. |
+| **Layout** | `source/` — git clone of the app's Dibbla repo (every deploy is a commit; latest SHA in the summary). `dibbla.yaml` — copied from the source when it has one, else generated from the deployed configuration (`dibbla-export.json` says which). `databases/<name>.dump` — one pg_dump custom archive per managed database bound to this app (`pg_restore`). `buckets/<name>/` — every object of each bucket bound to this app, the key as the relative path. `env/app.env` — the environment the container sees, resolved global < app; `env/<service>.env` — per-service entries where a service has its own. `docker-compose.yml` + `compose/restore-databases.sh` — the local run. `README.md` — what is here, how to start it, how to move each piece elsewhere. `dibbla-export.json` — machine-readable inventory (format `dibbla-export/v1`): every file, size, commit, variable **names** and sources, warnings. |
+| **Env files** | Inline variables (from `dibbla.yaml` / `-e`) keep their values. Secret values are blank lines `NAME=` with a comment naming the scope, unless `--include-secrets`. Platform-generated values (`DATABASE_URL_*`, `STORAGE_*`, `DIBBLA_*`) are written as comments — they point at Dibbla; the compose file sets local replacements (`postgres://postgres:postgres@postgres:5432/<db>?sslmode=disable`, `http://minio:9000` with `minioadmin`/`minioadmin`, `DIBBLA_SVC_<NAME>_HOST/PORT/URL` as compose DNS). |
+| **Behavior** | Requires a token and `git` on `PATH`. 1. `GET /deployments/<alias>` (404 → exit 4, "check `dibbla apps list`"). 2. Source via `/vcs/info` and the credential helper; no version control → recorded as `source_unavailable`, not an error. 3. `GET /databases/info` and `GET /buckets/info`, filtered on `deployment_alias`; dumps via `GET /databases/<name>/dump`, objects via `GET /buckets/<name>/objects` (paginated) and `…/objects/<key>`. 4. `GET /deployments/<alias>/env` (needs the deploy roles, like `env pull`). A key that cannot be a file path (`..` segments) is skipped and named in `skipped_keys` and the README. On any failure the partial directory is left for inspection and named on stderr. |
+| **Run it** | `cd <dir> && docker compose up --build`. Postgres (`pgvector/pgvector:pg17`, since Dibbla databases carry the vector extension) restores every dump on the first start of the `pgdata` volume; `minio-seed` mirrors `buckets/` on every start; public services are published from `localhost:8080` upwards in name order. Not there: login and `X-User-*` headers, custom domains/TLS, scheduled jobs. |
+| **Output** | `📦 Exporting <alias> → <dir>`, a line per database/bucket/env file, then `✅ Exported <alias> to <abs dir>` with `source: source (<sha>)` (or `not exported — <reason>`), counts, whether secret values are on disk, warnings, and the compose one-liner. Exit 0. |
+| **Errors** | Invalid alias → exit 5. `<dir> exists and is not empty` → exit 1 (pick another `--out`). `--include-secrets` declined → `Cancelled: nothing exported.` exit 5; on a non-TTY without `--yes` → exit 5 with the hint. Transport errors follow the ladder (401 → 3, 403 → 4 with the org named, 404 → 4). |
+| **When to use** | The user is leaving Dibbla, wants to run the app somewhere else, or wants a complete offline copy including data. For code alone, `dibbla clone`; for the environment alone, `dibbla env pull`; for one database, `dibbla db dump`. Never run it "to have a look" at a database — `apps get`, `db list` and the console answer questions without moving the customer's data around. |
 
 ---
 
@@ -724,19 +742,23 @@ dibbla apps rollback myapp --json -y
 
 ### apps get
 
-Show one deployment's record. This is the command `logs --pod-stream` 404s point at ("check `dibbla apps get <alias>`") to see which services exist.
+Show one deployment's record — the app's card, as the console and the connector's app card show it. `dibbla apps card <alias>` is an alias of the same command. This is also the command `logs --pod-stream` 404s point at ("check `dibbla apps get <alias>`") to see which services exist.
 
 | Item | Details |
 |------|---------|
-| **Usage** | `dibbla apps get <alias>` |
+| **Usage** | `dibbla apps get <alias>` / `dibbla apps card <alias>` |
 | **Arguments** | `alias` (required) — regex `^[a-z][a-z0-9-]{2,62}[a-z0-9]$`, validated locally (zero requests on failure, exit 5) |
-| **Flags** | `--json` — print the raw API document verbatim |
-| **Output** | Default: URL, status, deployed/updated times, the commit the app runs (`Commit:`), replicas, size, health, login policy; for multi-service apps a per-service breakdown with ready/replica counts and a `stateful` marker. When the app's `main` is ahead of the running commit (a `git push` whose deploy failed or is still building), a `Main: <sha> — NOT running` block follows with the failure (`BUILD_FAILED — …`) and the `dibbla deploy status <id>` to read; the fix is a new commit, never a rewind |
+| **Flags** | `--json` — print the raw API document verbatim. `--review` — print the REVIEW.md the running app was deployed with, and nothing else (exit 1 when there is none) |
+| **Output** | Default: URL, status, deployed/updated times, the commit the app runs (`Commit:`), replicas, size, health, login policy, then a **Security** section: `Review:` the guardrails status (OK / warnings / blockers found / none) with **the version it was written for** and when, plus a warning when the running version is newer than the review; `Scan:` the build-time scan's findings (leaked secrets, then critical/high/medium/low) with when the finding set last changed; `Agent:` whether the maintenance agent is on and whether anything has changed since it last looked, its last run, and proposals waiting for a decision. For multi-service apps a per-service breakdown with ready/replica counts and a `stateful` marker. When the app's `main` is ahead of the running commit (a `git push` whose deploy failed or is still building), a `Main: <sha> — NOT running` block follows with the failure (`BUILD_FAILED — …`) and the `dibbla deploy status <id>` to read; the fix is a new commit, never a rewind |
 | **Errors** | `404` exit 4 with a hint to `apps list`; `401/403` exit 3 |
+| **Notes** | The Security section is absent on a server that predates it (it is not "no review"). "Nothing has changed since the agent last looked" means neither the running version nor the scan's finding set is newer than the last maintenance run. Findings **per severity and per package** are in `--json` under `security.scan` only as a tally; the list itself is the API's `GET /deployments/{alias}/security-scan` |
 
 **Examples:**
 ```bash
 dibbla apps get myapp
+dibbla apps card myapp                       # same thing
+dibbla apps get myapp --review               # the deployed REVIEW.md
+dibbla apps get myapp --json | jq '.security'
 dibbla apps get myapp --json | jq '.services[].name'
 ```
 
@@ -1284,7 +1306,30 @@ Two things that bite:
 | **Flags** | `--deployment`, `-d` — for deployment-scoped secret |
 | | `--service`, `-s` — for per-service secret (requires `-d`) |
 | **Output** | Secret value only (pipeline-friendly) |
-| **Notes** | Returns the exact (deployment, service) row — there is no implicit fall-through. To inspect what a service container actually sees at runtime, exec into the pod or use `dibbla logs <alias> --service <svc>` after a redeploy. |
+| **Roles** | Reading a value needs the deploy roles (owner, admin, developer). A viewer can `secrets list` but gets `403 ROLE_FORBIDDEN` here — and from `env pull`, which follows the same rule. |
+| **Notes** | Returns the exact (deployment, service) row — there is no implicit fall-through. To see what a service container actually sees at runtime, values included, use `dibbla env pull --stdout -d <alias> [-s <svc>]`. |
+
+## env
+
+Values live in Dibbla, names live in the code. Secrets and the variables the platform generates (`DATABASE_URL_*`, `STORAGE_*`, `DIBBLA_*`) are injected into the app when it runs; `.env.example` in the repository lists the names the app needs. `dibbla env pull` fetches the values to a local `.env.local` so the app can run on this machine — that file never goes back: `.gitignore`, the VCS filter and the push hook all refuse it.
+
+### env pull
+
+| Item | Details |
+|------|---------|
+| **Usage** | `dibbla env pull [-d <alias>] [-s <service>] [--replace] [--stdout] [--json]` |
+| **App** | The app this folder is linked to (`dibbla clone` / `dibbla link` — the folder must be the repository root), or `--deployment <alias>` / `-d`. |
+| **Flags** | `--service`, `-s` — resolve one service's view of a multi-service app (its per-service secrets on top; `DIBBLA_SVC_*` as that container sees them) |
+| | `--replace` — rewrite `.env.local` from scratch instead of updating it in place |
+| | `--stdout` — print `KEY=value` lines to stdout instead of writing a file (`eval "$(dibbla env pull --stdout)"`); nothing is written, `.gitignore` is not touched |
+| | `--json` — print the API document: `{deployment_alias, service, variables:[{name, value, source}]}` with `source` ∈ `global` / `deployment` / `service` / `inline` / `platform` |
+| **What it resolves** | Exactly what the running container gets, same precedence: global secrets < deployment-wide < per-service (`-s`) < inline env (`deploy -e`, manifest `environment:`) < injected `DIBBLA_*` (`DIBBLA_ALIAS`, `DIBBLA_ENV`, `DIBBLA_AI_GATEWAY_URL`, `DIBBLA_SVC_*` …). `DATABASE_URL_*` and `STORAGE_*` are secrets the platform created, so they are in the set and reach the real database and buckets through the public proxy. `DIBBLA_IDENTITY_TOKEN_FILE` is left out — it names a file that exists only inside the pod. |
+| **The file** | `.env.local` in the current folder, mode 0600, first line `# Pulled from Dibbla — lives only on this machine; run 'dibbla env pull' again to refresh.` Without `--replace` an existing file is updated in place: keys Dibbla knows are refreshed where they stand, every other line (a local override, a comment) survives, new keys are appended sorted. |
+| **.gitignore** | If `.gitignore` in the folder has no `.env.local` line, one is appended (created if missing) and the command says so. The VCS filter strips the file from tarball deploys and the push hook refuses it on `git push` — three locks on the same door. |
+| **Output** | Names and counts only (`5 variable(s) from Dibbla (app shop) — 2 global, 2 app, 1 platform`), never values, plus the reminder that a local run with this file uses the app's real database and buckets. |
+| **Roles** | Owner, admin or developer — the same rule as `secrets get`. A viewer gets `403 ROLE_FORBIDDEN`. |
+| **Exit codes** | `0` written; `5` not a linked folder and no `-d`, or `--stdout` together with `--json`; API errors map like every other command (`403`/`404` → non-zero with the server's message). |
+| **New variable** | `dibbla secrets set NAME value -d <alias>` → add `NAME= # what it is` to `.env.example` → `dibbla env pull`. Never `.env.local` by hand as the only place: the running app would not have it. |
 
 ### secrets delete
 
