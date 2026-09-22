@@ -6,6 +6,10 @@ Most checks are mandatory on every deploy. The exceptions are the three that sta
 
 > **Enforced by the platform, on every deploy path.** `dibbla deploy` refuses to upload when `REVIEW.md` is missing at the deploy root, when no user handbook (`docs/index.md` or `APP.md`) is present, or when that handbook's `subtitle:` frontmatter is missing, empty, still a placeholder (`TBD`/`TODO`/`{{…}}`/`<one short…>`), or over the 140-byte hard cap. The server applies the same gate to the extracted source of **every** deploy — a `git push` to `main` of a linked folder, `platform_deployment_start` over MCP, a linked GitHub repository — and answers `REVIEW_INCOMPLETE` with the same message and hints, so a deploy that never touches the CLI is gated too. The only way past the gate is `dibbla deploy --skip-review` on an archive deploy, which is reserved for humans making one-line fixes — agents must run this checklist and write `REVIEW.md` (see Step 3.5) rather than passing the flag. A push has no flag: the commit itself must carry `REVIEW.md` and the handbook.
 
+**Explaining any of this to the person who owns the app?** Use [secure-app.md](secure-app.md) — the same ten risks in one plain sentence each, with who handles what, a sentence the owner can paste back to you, and what this report should show them afterwards. It is written for a reader who does not read code.
+
+**Check 5 (personal data) is the one an owner gets asked about by their customers.** [gdpr.md](gdpr.md) is that check written for them: what the platform handles (EU hosting, log and backup retention, what deletion removes), and the seven things that stay theirs — the inventory, their privacy policy, a data processing agreement for their own customers, access and erasure requests, retention in their own code, and personal data in logs and third parties.
+
 ---
 
 ## Severity levels
