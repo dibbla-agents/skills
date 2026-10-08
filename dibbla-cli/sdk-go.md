@@ -12,6 +12,7 @@ This doc covers building workers. For the workflow side (calling registered func
 | Run a long-running background job that reports progress to the dashboard | **SDK** — `jobs.JobHandler` + `server.RegisterJob` |
 | Run that job every night, and be told when it breaks or stops running | **SDK** for the job + a **pipeline** for the schedule and the alerts — see [pipelines.md](pipelines.md) |
 | Call third-party APIs using a workflow user's OAuth tokens (Google/Microsoft/GitHub) | **SDK** — advanced `Function[In, Out]` with `gs.OAuth` (in-repo workers only — see §5.2) |
+| Offer your functions as MCP tools at an address of their own, to the people an app's access list admits | **SDK** worker deployed as an app with `mcp: <name>` in `dibbla.yaml`; see [manifest.md](manifest.md) § 13.5 |
 | Deploy a regular HTTP app (web server, frontend, REST API) | `dibbla deploy` with a `Dockerfile`, **no SDK needed** |
 | Build / iterate / call a workflow without writing Go | `dibbla wf` commands — see [workflows.md](workflows.md) |
 
@@ -388,7 +389,7 @@ Key facts:
 ## 13. End-to-end deploy
 
 1. Write your worker (`main.go`) using the patterns above.
-2. Author a `Dockerfile` that builds the binary and runs it. Pass `SERVER_NAME` and `SERVER_API_TOKEN` via env.
-3. `dibbla deploy . --alias my-worker -m "feat: register summarize_doc fn" -e SERVER_API_TOKEN=...` — same flow as any Dibbla app, see [platform.md](platform.md).
+2. Author a `Dockerfile` that builds the binary and runs it. `SERVER_NAME` and `SERVER_API_TOKEN` arrive via env: `SERVER_NAME` as an env var, `SERVER_API_TOKEN` as a **secret** — an `ak_…` token is an account-wide credential.
+3. The person enters the token before the first deploy (it works for an alias that does not exist yet) on the page `dibbla secrets request SERVER_API_TOKEN -d my-worker --title "Dibbla API token for the worker"` links to; wait with `dibbla secrets request --status <id> --wait`. Then `dibbla deploy . --alias my-worker -m "feat: register summarize_doc fn" -e SERVER_NAME=my-worker` — same flow as any Dibbla app, see [platform.md](platform.md). Never pass the token with `-e`: the platform refuses it (`ENV_LOOKS_LIKE_SECRET`), and typed by an agent it would sit in its transcript.
 4. After the worker comes up, verify it registered: `dibbla functions list` (should show your `(server, function)` pair) and check `dibbla logs my-worker` for the "Registered N functions" / "Registered N jobs" lines.
 5. Reference the function from a workflow YAML by `(server, function)` — see [workflows.md](workflows.md) for the `function` node shape and the agent+tools wiring pattern.

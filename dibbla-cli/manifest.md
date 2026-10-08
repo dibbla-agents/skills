@@ -123,6 +123,7 @@ above remains for deep links.
 | `healthcheck` | object | no | no | platform default | Liveness/readiness/startup probes; see § 12 |
 | `domain` | string | no | no | `<alias>.dibbla.com` | Custom hostname for the public service; see § 14 |
 | `auth` | object | no | yes (per-field) | fall back to deploy flags | Per-service auth policy (`require_login`, `access_policy`, `google_scopes`); see § 13 |
+| `mcp` | string | no | no | — | Publishes the tool server this service runs as an MCP of its own; the value is the name the server registers under. See § 13.5 |
 
 Service names must match `^[a-z][a-z0-9-]{0,29}$`. Reserved names: `proxy`, `auth`, `system`, `dibbla`, `kube-*`. Service names appear in DNS, in env-var names (`DIBBLA_SVC_<NAME>_HOST` becomes upper-case-with-`_`), and in K8s object names — keep them short and DNS-safe.
 
@@ -217,15 +218,17 @@ services:
         FEATURE_FLAG_X: "false"
       prod:
         FEATURE_FLAG_X: "true"        # overlays default
-        SENTRY_DSN: "https://..."     # only in prod
+        API_BASE_URL: "https://api.example.com"   # only in prod
 ```
 
 Resolved environment for `--target-env prod`:
 ```
 LOG_LEVEL=info               (from default)
 FEATURE_FLAG_X=true          (prod overrides default)
-SENTRY_DSN=https://...       (prod-only)
+API_BASE_URL=https://api.example.com   (prod-only)
 ```
+
+`environment:` is for values that are not secret. A name that is one of the app's secrets is refused (`ENV_SHADOWS_SECRET`), and a name or value that looks like a secret is a deploy warning for a person and a refusal for an agent (`ENV_LOOKS_LIKE_SECRET`). A secret is entered by the person — `dibbla secrets request NAME -d <alias>` gives them the link — and reaches the container without a line here. A secret-looking line already in `environment:` stays a plain env var until it is removed and its value (a new one: the old was readable) entered the same way; `dibbla env promote` refuses it with `ENV_FROM_MANIFEST` because the next deploy would put it back.
 
 You can mix flat and per-env forms across fields, but **not within one field**. The validator rejects `environment:` with mixed scalar and mapping values to keep resolution unambiguous.
 
@@ -267,11 +270,12 @@ services:
     public: true
     environment:
       default:
-        # In non-dev, MONGO_URL must come from somewhere outside the deploy:
-        #   — `dibbla apps update <alias> -e MONGO_URL=...`,
-        #   — a deployment secret, or
-        #   — shell-substituted from CI: `MONGO_URL=... dibbla deploy ...`.
-        MONGO_URL: ${MONGO_URL}
+        # Outside dev, MONGO_URL is a secret on the app — a managed database's
+        # URL carries its password. The person enters it once, on the page
+        #   dibbla secrets request MONGO_URL -d <alias> links to,
+        # and it reaches the container without a line here. Naming it here
+        # would be refused (ENV_SHADOWS_SECRET).
+        LOG_LEVEL: info
       dev:
         # Service-discovery vars only resolve when `mongo` is in the active deploy.
         MONGO_URL: mongodb://${DIBBLA_SVC_MONGO_HOST}:${DIBBLA_SVC_MONGO_PORT}/
@@ -289,15 +293,16 @@ Deploy commands:
 
 ```bash
 # Dev — inline mongo container is part of the deploy, web reads ${DIBBLA_SVC_MONGO_*}
-dibbla deploy --target-env dev --profile dev -m "feat: ..."
+dibbla deploy --alias myapp-dev --target-env dev --profile dev -m "feat: ..."
 
-# Prod — mongo service is filtered out, web reads MONGO_URL from a managed source
-MONGO_URL=mongodb+srv://... dibbla deploy --target-env prod -m "feat: ..."
+# Prod — mongo service is filtered out, web reads MONGO_URL from the app's secret,
+# which the person entered beforehand: dibbla secrets request MONGO_URL -d myapp
+dibbla deploy --alias myapp --target-env prod -m "feat: ..."
 ```
 
 Three things to know for this pattern:
 
-1. **`${DIBBLA_SVC_MONGO_*}` only resolves when `mongo` is in the active deploy.** That's why the `default:` branch above can't reuse those vars — they don't exist when mongo is profiled out. Use a different value source (managed-DB connection string, secret, shell var) for non-dev.
+1. **`${DIBBLA_SVC_MONGO_*}` only resolves when `mongo` is in the active deploy.** That's why the `default:` branch above can't reuse those vars — they don't exist when mongo is profiled out. For non-dev, the managed database's connection string is a secret the person sets on that app — never an `environment:` value, `-e` or shell variable, which would carry its password as plain text. Dev and prod are separate aliases here for the same reason: an app that has the secret `MONGO_URL` refuses an `environment:` entry of that name.
 2. **`depends_on` references are not env-filtered.** `depends_on: [mongo]` would stay valid in prod even though mongo is gone — at runtime the hint is just dropped (no `DEPENDS_ON_UNKNOWN`). Best practice for cross-profile deps: omit `depends_on` and rely on application-level retry (PyMongo reconnect, libpq retry, etc.) for connection robustness.
 3. **`--target-env dev` and `--profile dev` are independent flags.** The first selects the env-aware `dev:` branch; the second activates `profiles: [dev]` services. You almost always want both together for the dev variant — combine them in your dev deploy command (or wrap in a `make dev-deploy` target so you don't have to remember).
 
@@ -617,6 +622,7 @@ Rules:
 - v1 supports `image:` only — no `build:` for init containers. The container has to be a pre-built pulled image. Use a build step in your CI to produce one if you need code from this repo.
 - Each init container must **exit cleanly**. An init that runs forever blocks the rollout and the deploy will time out.
 - `environment:` here is a flat map (no per-env form); use a single map of literals or `${VAR}` substitutions.
+- **An init container gets no Dibbla secrets** — only that literal map, and a non-`DIBBLA_*` `${VAR}` in it is filled in from the deploy shell and written into the manifest as plain text. Never put a secret there. A migration that needs the database URL runs at the start of the service's own container instead (its `CMD`/entrypoint), where `DATABASE_URL_<NAME>` is injected.
 - `name:` must be unique within the service and DNS-safe (matches `^[a-z][a-z0-9-]{0,29}$`).
 
 Init containers count against the deploy's pod resource budget — the cluster needs to schedule them too. They share the pod's PVCs (so an init can write fixtures into a `/data` mount the main container then reads).
@@ -756,6 +762,37 @@ In dev, env-aware resolution yields `require_login=false` AND `access_policy=inv
 
 ---
 
+## 13.5. Publishing a tool server as an MCP (`mcp:`)
+
+A service that runs a Dibbla tool server (a Go worker built with `sdk-go`, see [sdk-go.md](sdk-go.md)) can publish it as an MCP of its own with one line:
+
+```yaml
+services:
+  mcp:
+    build: .
+    port: 8080
+    public: true
+    mcp: my-tools                      # https://mcp.dibbla.com/platform/servers/my-tools
+    auth:
+      require_login: true
+      access_policy: all_members       # or invite_only
+    environment:
+      SERVER_NAME: my-tools            # must be the same name as mcp:
+      GRPC_SERVER_ADDRESS: grpc.dibbla.com:443
+```
+
+The worker itself is any `sdk-go` tool server — a `create go-worker` project, or the minimal one in [sdk-go.md](sdk-go.md): register functions under `SERVER_NAME`, start.
+
+- **The value is the tool server's name** — what the worker registers under (`SERVER_NAME` / `WithServerName`) — and it is the last part of the address. 1–64 characters of letters, digits, `.`, `_`, `-`; one service per name. Anything else is `MANIFEST_INVALID` at `services.<name>.mcp`.
+- **Who may deploy may publish.** No org admin exposes anything. The worker's credential in the pod is the app's workload identity, so no API token is set.
+- **Who gets the tools follows the app's access list.** `all_members`: every member of the app's organization. `invite_only`: the people under "Access & users" in the console, plus the org's owners and admins. A published server always requires a Dibbla login and an account in the organization; an app that is open without login does not make its MCP open. List changes apply to the next call, a policy change within 30 seconds.
+- **Every function of the server that can be a tool is one** (no agents, no `_`-prefixed internal functions). Published functions never appear in `platform_tools`.
+- **The deploy never fails over it, and never stays silent.** Every deploy with an `mcp:` line answers with exactly one of: what was published (`published as MCP: <name>`; `mcp_published` in `--json`), or why not and what to do (`mcp_notice`: a name another app owns → rename the server and the line; the installation has no workflow engine or per-server addresses are switched off → ask the operator; publishing failed → deploy again). A deploy that removed the line says the MCP was withdrawn.
+- **Unpublish** by removing the line and deploying; deleting the app also frees the name. A service behind an inactive profile publishes nothing.
+- Connect a client with `dibbla mcp server <name>`; on an installation where per-server addresses are switched off the address is a 404.
+
+---
+
 ## 14. Custom domains
 
 **Use `dibbla domains`, not the manifest.** Bringing your own hostname to an app is a platform operation, not a manifest field:
@@ -827,7 +864,7 @@ RUN --mount=type=secret,id=npm_token \
     NPM_TOKEN=$(cat /run/secrets/npm_token) npm ci
 ```
 
-The platform mounts the secret value into the BuildKit Solve via the named id; the value never lands in the image layer. You provide the value via `dibbla secrets set NPM_TOKEN_SECRET <value>` (deployment-wide, since builds happen before per-service routing).
+The platform mounts the secret value into the BuildKit Solve via the named id; the value never lands in the image layer. The person provides the value on the page `dibbla secrets request NPM_TOKEN_SECRET -d <alias>` links to, or with `dibbla secrets set` in their own terminal (deployment-wide, since builds happen before per-service routing); an agent names the secret and never supplies the value.
 
 - `id` is the BuildKit identifier referenced in the Dockerfile (`--mount=…,id=<id>`).
 - `source` is the name of the secret in the dibbla secrets store. Per-service build secrets are not supported in v1 — the build is one operation per service, and the secret is scoped to that build.
@@ -873,7 +910,7 @@ services:
 # .github/workflows/deploy.yml
 env:
   BUILD_VERSION: ${{ github.sha }}
-  SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
+  RELEASE_CHANNEL: ${{ vars.RELEASE_CHANNEL }}
 
 steps:
   - run: dibbla deploy . --alias myapp --target-env prod -m "deploy ${{ github.sha }}"
@@ -888,9 +925,11 @@ services:
     public: true
     environment:
       APP_VERSION: ${BUILD_VERSION}    # GitHub SHA
-      SENTRY_DSN:  ${SENTRY_DSN:-}     # empty default if unset
+      RELEASE_CHANNEL: ${RELEASE_CHANNEL:-stable}   # default if unset
       LOG_LEVEL:   info
 ```
+
+**Never substitute a secret.** The value is written into the `dibbla.yaml` that is uploaded, as an env var: a name or value that looks like a secret is refused from an agent (`ENV_LOOKS_LIKE_SECRET`), and a name that is one of the app's secrets is refused from anyone (`ENV_SHADOWS_SECRET`). A secret is entered by the person — `dibbla secrets request NAME -d <alias>` gives them the link — and reaches the container without a line in `environment:`.
 
 **Difference from server-side `${DIBBLA_*}`:** two non-overlapping substitution layers. The CLI handles user shell vars (anything NOT starting with `DIBBLA_`); the server handles platform discovery vars (`DIBBLA_*`) at render time. Both pass through unchanged on the other side.
 
@@ -1004,15 +1043,15 @@ services:
         LOG_LEVEL: info
         NODE_ENV: production
       prod:
-        SENTRY_DSN: ${SENTRY_DSN}     # comes from a runtime secret of the same name
+        LOG_LEVEL: warn               # SENTRY_DSN is a secret: no line here, see below
       staging:
         LOG_LEVEL: debug
     init:
-      - name: migrate
-        image: registry.example.com/migrate:v1
-        command: [migrate, up]
+      - name: wait-for-redis          # an init gets no secrets — see § 11
+        image: busybox:1.36
+        command: [sh, -c, "until nc -z $REDIS_HOST 6379; do sleep 1; done"]
         environment:
-          DATABASE_URL: ${DATABASE_URL}
+          REDIS_HOST: ${DIBBLA_SVC_REDIS_HOST}
     healthcheck:
       liveness:
         http_get: { path: /healthz }
@@ -1086,8 +1125,9 @@ Operate per-service afterwards:
 ```bash
 dibbla logs myapp --service worker -f
 dibbla apps restart myapp --service worker
-dibbla secrets set NPM_TOKEN_SECRET <token> -d myapp           # build-time secret
-dibbla secrets set SENTRY_DSN https://... -d myapp --service web
+# Each prints a link; the person enters the value there — an agent never supplies it:
+dibbla secrets request NPM_TOKEN_SECRET -d myapp --title "npm token"            # build-time secret
+dibbla secrets request SENTRY_DSN -d myapp --service web --title "Sentry DSN"   # only web sees it
 ```
 
 ---

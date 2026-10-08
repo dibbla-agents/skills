@@ -76,13 +76,13 @@ A `Dockerfile` at the deploy root is **required**. The platform does not run bui
 
 User-app environment variables come from three places:
 
-- **Secrets** — `dibbla secrets set <name> <value>` (org-global) or `dibbla secrets set <name> <value> -d <alias>` (scoped to one app). Injected as env vars at runtime. Secret name regex: `^[a-zA-Z][a-zA-Z0-9_]{0,127}$`. To load many at once from a `.env` file without a redeploy, use `dibbla secrets import <file> [-d <alias>]` (validates every key against that regex first; never prints values).
-- **`--env KEY=VAL`** on `dibbla deploy` and `dibbla apps update`. Persist across redeploys — set once, they stick. To seed them in bulk from a file, `--env-file <path>` reads a `.env`-style file as the base layer and `-e` overrides individual keys (file < `-e`).
+- **Secrets** — entered by the person, never typed by an agent: `dibbla secrets request <name> -d <alias>` prints a link where they type the value in the browser (the agent's way; omit `-d` for org-global; works before the app's first deploy), or `dibbla secrets set <name> [-d <alias>]` in their own terminal, value at a hidden prompt. A plain env var that should have been a secret becomes one with `dibbla env promote <name> -d <alias>` — a new value, the env var removed, the app restarted. Injected as env vars at runtime. A secret is write-only: Dibbla never hands its value out — not to the CLI, not to an API, not to an AI assistant; only the running app gets it. Secret name regex: `^[a-zA-Z][a-zA-Z0-9_]{0,127}$`. To load many at once from a `.env` file without a redeploy, use `dibbla secrets import <file> [-d <alias>]` (validates every key against that regex first; never prints values).
+- **`--env KEY=VAL`** on `dibbla deploy` and `dibbla apps update`. An env var is not sensitive: stored as-is, its value may be read and used freely — anything sensitive is a secret. Persist across redeploys — set once, they stick. To seed them in bulk from a file, `--env-file <path>` reads a `.env`-style file as the base layer and `-e` overrides individual keys (file < `-e`). Every env write, `dibbla.yaml` `environment:` included, is checked: a name that is one of the app's secrets is refused (`ENV_SHADOWS_SECRET`), and a name or value that looks like a secret is refused (`ENV_LOOKS_LIKE_SECRET`) unless a person passes `--allow-secret-env` because it is not one — an agent never does.
 - **Auto-injected database URL.** `dibbla db create <name>` creates a secret named `DATABASE_URL_<UPPERCASED_UNDERSCORED_NAME>` (e.g. `db create my-db` → `DATABASE_URL_MY_DB`). **There is no plain `DATABASE_URL`** unless you set one explicitly. App code must read the suffixed variable. The URL connects through the Dibbla database proxy with a managed per-database proxy secret (not the raw Postgres password) — use it as-is (§7).
 
 Use these channels — never hardcode secrets in the image, in source files committed to VCS, or in `.env` files in the deploy directory (§8 strips them anyway).
 
-**Running the app on your own machine — values live in Dibbla, names live in the code.** Think of it as a safe and a set of keyholes: the values sit in Dibbla's safe, and `.env.example` in the repository lists the keyholes (one `NAME= # what it is` per line, committed, kept by §8). `dibbla env pull` in a linked folder fetches the values — the resolved secret set plus the platform-generated `DATABASE_URL_*`, `STORAGE_*` and `DIBBLA_*` — into `.env.local`, adds that file to `.gitignore` if it is missing, and the VCS filter and the push hook refuse it on top of that, so it can never travel back. Dibbla has **one environment per app**: a local run with that file talks to the app's real database and buckets. Say so before starting, and offer a local Postgres if the person wants isolation. The `DATABASE_URL_*` in the file is the address the app uses inside Dibbla, which on some instances is a cluster-internal host that does not resolve from your machine; a local run sets it in the start command from `dibbla db connect <name> -q` (public proxy, your own login) — never in `.env.local`, which the next pull would overwrite. Details: reference.md → env pull → "Database from your machine". A new variable is `dibbla secrets set NAME value -d <alias>` → the name in `.env.example` → `dibbla env pull`, never a hand-written `.env.local` as the only place.
+**Running the app on your own machine — values live in Dibbla, names live in the code.** Think of it as a safe and a set of keyholes: the values sit in Dibbla's safe, and `.env.example` in the repository lists the keyholes (one `NAME= # what it is` per line, committed, kept by §8). `dibbla env pull` in a linked folder writes `.env.local`: every variable with its value (inline env, the platform's `DIBBLA_*`), and every secret — including the platform-generated `DATABASE_URL_*` and `STORAGE_*` — by name only, as an empty `NAME=` line. The safe opens only into the running app: Dibbla never hands out a secret's value, so each secret gets a development value of the developer's own, and a secret line that has a value is never overwritten by a later pull, not even with `--replace`. The command adds `.env.local` to `.gitignore` if it is missing, and the VCS filter and the push hook refuse it on top of that, so it can never travel back. For the database, `DATABASE_URL_<NAME>` arrives empty with a hint: a local run sets it in the start command from `dibbla db connect <name> -q` (public proxy, your own login) — that is the app's real data, so say so — or points it at a local Postgres for isolation. A bucket's `STORAGE_<NAME>_*` keys cannot be fetched with the CLI; a local run uses a local S3-compatible store or does without. Details: reference.md → env pull → "Database from your machine". A new secret is entered by the person (`dibbla secrets request NAME -d <alias>` for a link, their own `dibbla secrets set`, or the console — never pasted through an AI assistant) → the name in `.env.example` → `dibbla env pull`, never a hand-written `.env.local` as the only place.
 
 ---
 
@@ -95,12 +95,12 @@ This trips up almost every frontend project on first deploy, so understand the d
 **The CLI does not currently expose `--build-arg`.** That means anything that needs to be present during `docker build` has to come from one of these patterns:
 
 1. **Public values → commit them.** Vite/Next/CRA's `*_PUBLIC_*` / `VITE_*` / `REACT_APP_*` prefixes are explicit signals from the framework: *"this value will be visible in browser devtools after the build."* If the value is genuinely public (Supabase anon key, public API URL, feature flags, Sentry DSN), inline it in source or commit a `.env.production` to the repo. **No secret is leaking — it would be in the bundle either way.** Just be sure you're not committing a secret by mistake; the `*_PUBLIC_*` naming convention helps.
-2. **Truly secret build-time inputs → don't put them in the bundle.** If a value would be a problem to expose to a logged-in user with devtools open, it doesn't belong in a Vite/Next/CRA build. Move the call server-side: route the request through your backend (read the secret from `dibbla secrets`/`--env` at runtime there) and have the frontend call your backend instead of the third-party API directly.
+2. **Truly secret build-time inputs → don't put them in the bundle.** If a value would be a problem to expose to a logged-in user with devtools open, it doesn't belong in a Vite/Next/CRA build. Move the call server-side: route the request through your backend (read the secret from a Dibbla secret at runtime there) and have the frontend call your backend instead of the third-party API directly.
 3. **Per-environment build-time toggles → use a runtime config endpoint.** If you need different values per deploy (staging vs prod) but they aren't *secret*, ship a small `/config.json` endpoint from your backend that returns `{ apiUrl, sentryDsn, ... }` populated from runtime env vars, and have the frontend fetch it on startup. The bundle stays the same across environments; the values come from `--env` at runtime.
 
 What does **not** work:
 - Putting `VITE_FOO=...` in `dibbla deploy --env` and expecting the frontend to see it. The bundle was built before that env var existed.
-- Relying on a `.env.local` on your laptop as the *source* of a value. It never reaches Dibbla: the CLI strips `.env.production` and `.env.prod`, the server denylist strips `.env` and `.env.*` (§8), and the push hook refuses them. `.env.local` is the *copy* `dibbla env pull` writes for local runs; the value itself must be set with `dibbla secrets set`.
+- Relying on a `.env.local` on your laptop as the *source* of a value. It never reaches Dibbla: the CLI strips `.env.production` and `.env.prod`, the server denylist strips `.env` and `.env.*` (§8), and the push hook refuses them. `.env.local` is the file `dibbla env pull` writes for local runs — variables with values, secrets by name with your development values; the value itself must be entered in Dibbla (`dibbla secrets request`, or `dibbla secrets set`).
 - `ARG` directives in the Dockerfile expecting values from `--env` flags. `--env` becomes runtime env, not Docker build args.
 
 Pattern (1) — inlining public values — is the right answer for the Lovable / Supabase / Firebase-frontend genre. Pattern (3) — runtime config endpoint — is the right answer when values genuinely differ across deploys but are still public.
@@ -117,7 +117,7 @@ App database connections go **through the Dibbla database proxy** at `db.<base-d
 
 The proxy uses standard Postgres TLS negotiation, so any driver works without PostgreSQL 17 "direct TLS". The injected credential is a managed per-database proxy secret (not your Postgres role password) and only works through the proxy. Working snippets for `pg`, psycopg2, and Prisma live in `reference.md` → "TLS for application database clients".
 
-Not every Dibbla instance injects the proxy URL yet: on some, `DATABASE_URL_<NAME>` is the database's cluster-internal address. Inside the app the rule is the same — use it as-is. It only matters when you take the value out of Dibbla: from your own machine, connect with `dibbla db connect <name> -q` (always the proxy), never with a pulled `DATABASE_URL_*` (see §5).
+Not every Dibbla instance injects the proxy URL yet: on some, `DATABASE_URL_<NAME>` is the database's cluster-internal address. Inside the app the rule is the same — use it as-is. The value never leaves Dibbla (it is a secret, and secrets are write-only): from your own machine, connect with `dibbla db connect <name> -q` (always the proxy) (see §5).
 
 ---
 
@@ -612,7 +612,7 @@ The rest are application-side concerns. For the security review before deploy, r
 - [ ] Image `EXPOSE`s and listens on the same port passed to `--port` (or `80` if `--port` is omitted).
 - [ ] App binds to `0.0.0.0`, not `127.0.0.1`.
 - [ ] `USER` directive sets a non-root user in the runtime stage.
-- [ ] All secrets come from `dibbla secrets set` or `--env`, never hardcoded or baked into the image.
+- [ ] All secrets come from `dibbla secrets request` / `dibbla secrets set` / `dibbla secrets import` (the value entered by the person) or the console — never `--env`, never hardcoded or baked into the image. A plain env var that holds one is promoted: `dibbla env promote NAME -d <alias>`.
 - [ ] Postgres client uses the injected `DATABASE_URL` as-is (`sslmode=require`, valid cert via the proxy — see §7); does **not** disable cert verification or use `sslmode=disable`.
 - [ ] For Vite/Next.js/CRA frontends, public values are inlined or fetched via a runtime config endpoint — not passed via `--env` (see §6).
 - [ ] If `--require-login`, app reads `X-User-*` headers (see §10) and does not attempt JWT verification.
@@ -640,14 +640,19 @@ is a tool call rather than a shell command.
 **Which `mcp` command to use.** `dibbla mcp platform` connects everything
 through one entry: every platform flow, and the organization's exposed
 functions as the single `platform_tools` tool (the official connector). `dibbla
-mcp server <name>` connects one tool server's exposed functions only, at
+mcp server <name>` connects one tool server's functions only, at
 `/platform/servers/<name>`, as separate MCP tools the person can switch on and
 off in their client — use it when they want just that server, modularly, and
-nothing else from the platform. Same OAuth grant, same login; find names with
-`dibbla functions exposed`. Neither command runs a server: both only print
+nothing else from the platform. Same OAuth grant, same login. A server is on
+its address either because the app that runs it publishes it (`mcp: <name>` in
+`dibbla.yaml`, see [manifest.md](manifest.md) § 13.5) or because an org admin
+exposed single functions;
+find exposed names with `dibbla functions exposed`, and a published name in
+the app's manifest or its deploy output. Neither command runs a server: both only print
 client configuration. After connecting a client to a server address, run
 `dibbla mcp server <name> --check`: the address answers "Connected" with **0
-tools** both for a wrong name and for a server with nothing exposed, so an
+tools** for a wrong name, for a server with nothing published or exposed, and
+for a published server whose app's access list does not include the caller, so an
 empty tool list never means the platform has no functions.
 
 ### Parity is measured in capabilities, not in tools
@@ -682,7 +687,7 @@ the step.
 | List buckets or read one | `platform_storage_buckets` | omit `name` to list |
 | Create a bucket or rotate its credential | `platform_storage_bucket_write` | `action` |
 | List secret names | `platform_secrets` | — |
-| Store, rotate or remove a secret | `platform_secret_write` | `action: set` \| `delete` |
+| Ask the person to enter a secret's value, check on it, or remove a secret | `platform_secret_write` | `action: request` \| `status` \| `delete` |
 | Read deployment history, one revision, or the running deploy's logs | `platform_deployments` | `sha`, `view: logs` |
 | Check a `dibbla.yaml`, or preview what it would apply | `platform_deployment_preflight` | `depth: validate` \| `preview` |
 | Deploy | `platform_deployment_start` | — |
@@ -721,12 +726,14 @@ something on the caller's own machine that no remote call can reach:
 | `cli.deploy.archive` | `deploy` | Reads the caller's filesystem to build the upload archive. The **deploy itself** is remote (`platform.deployments.start`); only the archiving is local. |
 | `cli.run` | `run` | Executes commands on the caller's machine. |
 | `cli.manifest.validate` | `manifest validate` | A local file walk. Server-side validation of the same manifest is remote (`platform.manifests.validate`, which is `platform_deployment_preflight`). |
-| `cli.credentials.reveal` | `secrets get`, `env pull`, `storage credentials`, `db connect` | Returns credential material in plaintext — to the terminal, or as `.env.local` on the caller's disk. Keeping credentials out of a model's context window is an invariant, not a precaution. |
-| `platform.secrets.set` | `secrets set` | Takes the value as an argument or on stdin on the caller's machine. Since DIB-928 no tool takes a secret value at all: remotely an agent asks the person to enter it on a signed-in Dibbla page (`platform.secrets.request`, `platform_secret_write` action=request) and polls `platform.secrets.request_status`. |
+| `cli.credentials.reveal` | `db connect`, `storage credentials` | Each returns a credential of the caller's own, in plaintext to the terminal: `db connect` a connection string carrying their API token as its password, `storage credentials` a one-hour key minted for them for one bucket's objects (never the app's key). Keeping credentials out of a model's context window is an invariant, not a precaution — an agent uses either only inside `$(…)` / `eval "$(…)"`. `env pull` reveals no secret value: it writes `.env.local` on the caller's disk with the variables' values and the secrets' names only. `secrets get` reveals nothing at all any more — a secret is write-only, so it explains that and exits 1. |
+| `cli.env.pull` | `env pull` | Writes `.env.local` and a `.gitignore` line in the caller's working directory, merging into what is there. `env pull` reveals no secret value: variables arrive with their values, secrets by name only. Reading the same environment remotely is not a `/platform` capability — tool results keep environment values out. |
+| `cli.secrets.get` | `secrets get` | Reads nothing and calls nothing. A secret is write-only, so the command only says so and exits 1; there is no capability behind it to make remote, on any surface. |
+| `platform.secrets.set` | `secrets set` | Takes the value as an argument or on stdin on the caller's machine. Since DIB-928 no tool takes a secret value at all: remotely an agent asks the person to enter it on a signed-in Dibbla page (`platform.secrets.request`, `platform_secret_write` action=request) and polls `platform.secrets.request_status`. The same page is what `dibbla secrets request` links to, for an agent in a terminal. |
 | `cli.secrets.import` | `secrets import` | Reads a `.env` file from disk. Setting a value remotely goes through the request page above, never through a tool argument. |
 | `cli.db.dump` | `db dump` | Needs the caller's `pg_dump` and writes to the caller's disk. |
 | `cli.clone` | `clone` | Writes a git working copy locally. Reading the same source remotely is `platform.files.get`. |
-| `cli.export` | `export` | Writes the whole app — source, database dumps, bucket objects, env files, compose sketch — to the caller's disk; with `--include-secrets`, secret values in plaintext after a terminal confirmation. The customer's data leaving the platform has no place in a model's context. |
+| `cli.export` | `export` | Writes the whole app — source, database dumps, bucket objects, env files (variables with values, secrets by name only; secret values are not part of an export), compose sketch — to the caller's disk. The customer's data leaving the platform has no place in a model's context. |
 | `cli.scaffold` | `create go-worker`, `template install`, `skills install` | Materialises files in a directory on the caller's machine. |
 | `cli.login`, `cli.context`, `cli.org.select` | `login`, `logout`, `context …`, `org use/clear` | The OS keyring, a TTY, and local config. Remotely, who you are and which org you act as are fixed by the grant — a model-controlled context or org switch is forbidden outright. |
 | `cli.update` | `update`, `uninstall` | Replaces a binary on the caller's machine. |
@@ -735,8 +742,8 @@ something on the caller's own machine that no remote call can reach:
 | `cli.admin.models` | `admin models list`, `admin models set`, `admin models delete` | Edits the platform-wide model catalog in the AI gateway, which only a Dibbla global admin may do. That is an operator authority no OAuth scope carries, and the catalog is not a tenant's resource. |
 
 There is nothing else. Every other CLI capability is reachable through
-`/platform` today; a gap would be a `not-yet-available` row with an owner and a
-work item, never silence, and there are none. The authoritative, always-current
+`/platform` today; a gap is a `not-yet-available` row with an owner and a work
+item, never silence — and there are none. The authoritative, always-current
 table is the [platform capability contract](https://docs.dibbla.com/reference/platform-contract).
 
 **This is enforced, not documented.** `dibbla-cli` fails its own build when a

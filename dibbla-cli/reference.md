@@ -521,8 +521,9 @@ The same applies to Python (`pip install -r requirements.txt` rather than shippi
 | | `--message`, `-m` — Deploy message, used verbatim as the VCS commit subject (local bare repo and GitHub mirror). Max 500 chars; API returns 400 if exceeded. **Agents must always pass this** — treat it like a git commit subject (imperative mood, ≤72 chars). |
 || | `--force`, `-f` — recreate the deployment after a successful build if the alias exists (brief restart; a failed build leaves the running app untouched) |
 | | `--update`, `-u` — rolling update of existing deployment (zero downtime) |
-| | `--env`, `-e` — env var `KEY=value` (repeatable) |
-| | `--env-file <path>` — bulk-load env vars from a `.env`-style file. The file is the base layer; `-e` flags override individual keys (file < `-e`, same precedence as `dibbla run`). Keep the file **outside** the deploy directory (a `.env` in the deploy root is a guardrail blocker). |
+| | `--env`, `-e` — env var `KEY=value` (repeatable). Values that are not secret only: a name that is one of the app's secrets (`ENV_SHADOWS_SECRET`) or a name or value that looks like a secret (`ENV_LOOKS_LIKE_SECRET`) is refused. On a first deploy the person sets the app's secrets beforehand — `dibbla secrets set NAME -d <alias>` works before the alias exists. |
+| | `--env-file <path>` — bulk-load env vars from a `.env`-style file. The file is the base layer; `-e` flags override individual keys (file < `-e`, same precedence as `dibbla run`). Keep the file **outside** the deploy directory (a `.env` in the deploy root is a guardrail blocker). These become **plain env vars**: a file of keys and passwords belongs in `dibbla secrets import <file> -d <alias>` instead. |
+| | `--allow-secret-env` — send env vars that look like secrets anyway, because they are not. Without it the server refuses them (`ENV_LOOKS_LIKE_SECRET`, exit non-zero, names the variables, never the values). It never covers a name that is one of the app's secrets (`ENV_SHADOWS_SECRET` — an env var of that name would replace the secret), and the server ignores it from an AI agent. **An agent does not pass this flag:** a value that looks like a secret goes in as a secret, entered by the person. |
 | | `--cpu` — CPU request (e.g. `500m`) |
 | | `--memory` — Memory request (e.g. `512Mi`) |
 | | `--port` — Container port (e.g. `3000`) |
@@ -559,7 +560,7 @@ For the manifest schema, env-aware fields, profiles, service discovery, NetworkP
 | `PUBLIC_SERVICE_MISSING` | No `public: true` service and `--no-public` not set | Mark a service `public: true` or pass `--no-public` |
 | `PUBLIC_MISSING_PORT` | A `public: true` service has no `port:` | Add `port:` |
 | `QUOTA_EXCEEDED` | Resolved set exceeds an org quota | Trim `replicas` / `cpu` / `memory` / `volumes`, or talk to the platform operator |
-| `BUILD_FAILED` | A build step failed | Check the deploy event log; if it's a missing build secret, run `dibbla secrets set <NAME> <value> -d <alias>` first |
+| `BUILD_FAILED` | A build step failed | Check the deploy event log; if it's a missing build secret, request it — `dibbla secrets request <NAME> -d <alias> --title "…"`, the person enters it on the linked page, `--status <id> --wait` — then deploy again |
 | `REGISTRY_UNAVAILABLE` | Dibbla's container registry answered 5xx, ran out of disk or did not answer while the image was pushed (HTTP 503, exit `20`) | Platform fault: change nothing, the running app was not touched. Retry in a few minutes; escalate to Dibbla support if it persists |
 | `BUILD_SERVICE_UNAVAILABLE` | Dibbla's build service (BuildKit) could not be reached (HTTP 503, exit `20`) | Same as `REGISTRY_UNAVAILABLE` |
 | `DEPLOY_IN_PROGRESS` | Another deploy is in-flight for this alias | Wait or `dibbla apps cancel <alias>` |
@@ -581,6 +582,16 @@ successful deploy ends with `Heads-up: your free trial ends in N days (…)` and
 the upgrade link (`trial_warning` in `--json`; on a `git push` it is on the
 `remote:` lines). The deploy worked — tell the user once, with the link, and
 carry on.
+
+**Secret-looking `environment:` (not an error, not fine either).** When a
+`dibbla.yaml` `environment:` entry looks like a secret, a person's deploy goes
+ahead and ends with an `env ·` line per entry — the variable and the reason,
+never the value — and one line on how to move it (`env_warnings` in
+`--json`). The entry is still a plain env var, readable by anyone who can read
+the app's source. Tell the person; the fix is to remove the line, have them
+enter a new value through `dibbla secrets request NAME -d <alias>`, and deploy
+again (`dibbla env promote` refuses a `dibbla.yaml` entry — the next deploy
+would put it back).
 
 ---
 
@@ -613,14 +624,14 @@ Take everything an app keeps on Dibbla with you, in formats other tools read. On
 
 | Item | Details |
 |------|---------|
-| **Usage** | `dibbla export <alias> [--out <dir>] [--include-secrets] [--yes]` |
-| **Flags** | `--out`, `-o` — destination (default `./<alias>-export`); must not exist or be empty — nothing is ever overwritten. `--include-secrets` — write secret values in plaintext into the env files; asks `Write secret values in plain text into the export?` (default **no**). `--yes`, `-y` — answer that question for scripts; without it on a non-TTY the command refuses with exit 5 before writing anything. |
-| **Layout** | `source/` — git clone of the app's Dibbla repo (every deploy is a commit; latest SHA in the summary). `dibbla.yaml` — copied from the source when it has one, else generated from the deployed configuration (`dibbla-export.json` says which). `databases/<name>.dump` — one pg_dump custom archive per managed database bound to this app (`pg_restore`). `buckets/<name>/` — every object of each bucket bound to this app, the key as the relative path. `env/app.env` — the environment the container sees, resolved global < app; `env/<service>.env` — per-service entries where a service has its own. `docker-compose.yml` + `compose/restore-databases.sh` — the local run. `README.md` — what is here, how to start it, how to move each piece elsewhere. `dibbla-export.json` — machine-readable inventory (format `dibbla-export/v1`): every file, size, commit, variable **names** and sources, warnings. |
-| **Env files** | Inline variables (from `dibbla.yaml` / `-e`) keep their values. Secret values are blank lines `NAME=` with a comment naming the scope, unless `--include-secrets`. Platform-generated values (`DATABASE_URL_*`, `STORAGE_*`, `DIBBLA_*`) are written as comments — they point at Dibbla; the compose file sets local replacements (`postgres://postgres:postgres@postgres:5432/<db>?sslmode=disable`, `http://minio:9000` with `minioadmin`/`minioadmin`, `DIBBLA_SVC_<NAME>_HOST/PORT/URL` as compose DNS). |
+| **Usage** | `dibbla export <alias> [--out <dir>]` |
+| **Flags** | `--out`, `-o` — destination (default `./<alias>-export`); must not exist or be empty — nothing is ever overwritten. `--include-secrets` and `--yes` were removed: secret values cannot be exported (a secret is write-only on Dibbla). Both are still accepted, hidden, so an old script hears why — `--include-secrets` is refused with exit 5 before anything is written, `--yes` does nothing. |
+| **Layout** | `source/` — git clone of the app's Dibbla repo (every deploy is a commit; latest SHA in the summary). `dibbla.yaml` — copied from the source when it has one, else generated from the deployed configuration (`dibbla-export.json` says which). `databases/<name>.dump` — one pg_dump custom archive per managed database bound to this app (`pg_restore`). `buckets/<name>/` — every object of each bucket bound to this app, the key as the relative path. `env/app.env` — the environment the container sees, resolved global < app; `env/<service>.env` — the per-service secrets (by name) where a service has its own. `docker-compose.yml` + `compose/restore-databases.sh` — the local run. `README.md` — what is here, how to start it, how to move each piece elsewhere. `dibbla-export.json` — machine-readable inventory (format `dibbla-export/v1`): every file, size, commit, variable **names** and sources, warnings. |
+| **Env files** | Variables (inline, from `dibbla.yaml` / `-e`) keep their values. Secrets are listed by name only — `# <scope> secret; value not exported` over a blank `NAME=` — because Dibbla never hands out a secret's value; the README says secret values are not part of an export. Platform-generated names (`DATABASE_URL_*`, `STORAGE_*`, `DIBBLA_*`) stay commented out — they point at Dibbla; the compose file sets local replacements (`postgres://postgres:postgres@postgres:5432/<db>?sslmode=disable`, `http://minio:9000` with `minioadmin`/`minioadmin`, `DIBBLA_SVC_<NAME>_HOST/PORT/URL` as compose DNS). |
 | **Behavior** | Requires a token and `git` on `PATH`. 1. `GET /deployments/<alias>` (404 → exit 4, "check `dibbla apps list`"). 2. Source via `/vcs/info` and the credential helper; no version control → recorded as `source_unavailable`, not an error. 3. `GET /databases/info` and `GET /buckets/info`, filtered on `deployment_alias`; dumps via `GET /databases/<name>/dump`, objects via `GET /buckets/<name>/objects` (paginated) and `…/objects/<key>`. 4. `GET /deployments/<alias>/env` (needs the deploy roles, like `env pull`). A key that cannot be a file path (`..` segments) is skipped and named in `skipped_keys` and the README. On any failure the partial directory is left for inspection and named on stderr. |
 | **Run it** | `cd <dir> && docker compose up --build`. Postgres (`pgvector/pgvector:pg17`, since Dibbla databases carry the vector extension) restores every dump on the first start of the `pgdata` volume; `minio-seed` mirrors `buckets/` on every start; public services are published from `localhost:8080` upwards in name order. Not there: login and `X-User-*` headers, custom domains/TLS, scheduled jobs. |
-| **Output** | `📦 Exporting <alias> → <dir>`, a line per database/bucket/env file, then `✅ Exported <alias> to <abs dir>` with `source: source (<sha>)` (or `not exported — <reason>`), counts, whether secret values are on disk, warnings, and the compose one-liner. Exit 0. |
-| **Errors** | Invalid alias → exit 5. `<dir> exists and is not empty` → exit 1 (pick another `--out`). `--include-secrets` declined → `Cancelled: nothing exported.` exit 5; on a non-TTY without `--yes` → exit 5 with the hint. Transport errors follow the ladder (401 → 3, 403 → 4 with the org named, 404 → 4). |
+| **Output** | `📦 Exporting <alias> → <dir>`, a line per database/bucket/env file, then `✅ Exported <alias> to <abs dir>` with `source: source (<sha>)` (or `not exported — <reason>`), counts, a line saying secret values are not part of an export (`env/` lists the names), warnings, and the compose one-liner. Exit 0. |
+| **Errors** | Invalid alias → exit 5. `<dir> exists and is not empty` → exit 1 (pick another `--out`). `--include-secrets` → `secret values cannot be exported` exit 5, nothing written. Transport errors follow the ladder (401 → 3, 403 → 4 with the org named, 404 → 4). |
 | **When to use** | The user is leaving Dibbla, wants to run the app somewhere else, or wants a complete offline copy including data. For code alone, `dibbla clone`; for the environment alone, `dibbla env pull`; for one database, `dibbla db dump`. Never run it "to have a look" at a database — `apps get`, `db list` and the console answer questions without moving the customer's data around. |
 
 ---
@@ -696,8 +707,9 @@ dibbla preview --json | jq '.active_services'
 |------|---------|
 | **Usage** | `dibbla apps update <alias>` |
 | **Arguments** | `alias` (required) — deployment alias |
-| **Flags** | `--env`, `-e` — env var `KEY=value` (repeatable) |
+| **Flags** | `--env`, `-e` — env var `KEY=value` (repeatable). Values that are not secret only — checked as on `deploy`; a secret gets a new value through `dibbla secrets request NAME -d <alias>`, and a plain env var that should be a secret through `dibbla env promote NAME -d <alias>` |
 | | `--env-file <path>` — bulk-load env vars from a `.env`-style file (base layer; `-e` overrides individual keys, file < `-e`) |
+| | `--allow-secret-env` — as on `deploy`: send changed env vars that look like secrets anyway. Only the keys the update changes are checked. A person's flag; an agent never passes it. |
 | | `--replicas` — desired replica count |
 | | `--cpu` — CPU request/limit (e.g. `500m`, `1`) |
 | | `--memory` — Memory request/limit (e.g. `256Mi`, `512Mi`) |
@@ -1028,7 +1040,60 @@ fail with `DOMAINS_NOT_CONFIGURED` (503) — the feature is off, not a CLI bug.
 
 ---
 
-## logs
+## notifications
+
+Where Dibbla's alerts go — failing checks, maintenance findings and
+proposals, new security findings, failed deploys, pipelines that stopped — and
+whether they arrived. Owners and admins get the organization's app alerts by
+email without setting anything up; these commands show and change that.
+Aliases: `notification`, `notify`.
+
+```bash
+dibbla notifications list [--app <alias>] [--json]
+dibbla notifications events [--json]
+dibbla notifications add <event-type> --app <alias> [--severity info|attention|critical] [--channel email|slack] [--digest immediate|hourly|daily] [--test] [--json]
+dibbla notifications add <event-type> --org-wide [--app <alias>] [--channel email|slack|teams|discourse|webhook] [--target <email>] [--severity …] [--test]
+dibbla notifications test <id> [--json]
+dibbla notifications remove <id> [--yes]
+dibbla notifications history [--app <alias>] [--limit 1-100] [--json]
+```
+
+- **`list`** — the subscriptions that reach you (*Yours*: personal rows,
+  including the owner/admin default on `application.*`) and, for owners and
+  admins, *The organization's*. `--app` keeps the rows for that app and the
+  rows for every app. Each row shows an 8-character id, the event type with its
+  label, the app (or *every app*), the severity floor and the destination.
+- **`events`** — the catalog: every event type and family you can subscribe
+  to, with its default severity. `add` refuses anything else.
+- **`add`** — personal by default: needs `--app` (an app you build, maintain
+  or administer), goes to your own email address, or with `--channel slack`
+  to your linked Slack account; no `--target`. `--org-wide` (owners and
+  admins) adds the organization's subscription: `--app` optional (omit for
+  every app), `--target` required for email, other channels use the
+  organization's connected integration. Pipeline and trial events are not about
+  one app, so they are `--org-wide` only. Adding an existing subscription again
+  updates its severity and digest (and re-enables an unsubscribed one).
+  `--test` sends a test straight after.
+- **`--severity`** — the lowest severity delivered: `info` < `attention`
+  (default) < `critical`. `info` includes maintenance runs that found nothing.
+- **`test`** — sends one real notification through the subscription now,
+  whatever its digest or severity, and prints the channel's answer: `sent`, or
+  `failed`/`dropped` with the reason. Exit 1 when not delivered. At most a few
+  tests per person per ten minutes (429, exit 1).
+- **`remove`** — your own subscription, or (owners and admins) one of the
+  organization's. Another member's personal subscription is theirs. Removing
+  the owner/admin default is final; it is not re-created.
+- **`history`** — recent events, newest first, each with its deliveries
+  (`sent`, `pending`, `failed`, `dropped` + reason). Owners and admins see the
+  whole organization; others see what was delivered to them, or with `--app`
+  that app's events and their own deliveries.
+- **ids** — every command that takes an id accepts the 8 characters `list`
+  prints, or the full id.
+
+Exit codes: 0 ok, 1 not delivered / other, 3 not allowed (e.g. `--org-wide`
+as a developer), 4 no such app or subscription, 5 invalid request (unknown
+event type, missing `--app`, bad severity).
+
 
 Print runtime logs for a deployed app, sourced from the platform's Loki backend. By default returns the last 15 minutes and exits. **This is the primary way to debug a deployed app without redeploying** — when a deploy succeeds but the app 500s, errors out, or behaves unexpectedly, run `dibbla logs <app>` first rather than adding `console.log` and redeploying.
 
@@ -1139,7 +1204,7 @@ dibbla logs expense-reporter --service worker -f     # narrow to one service aft
 | **Usage** | `dibbla db connect <name> [--quiet | -q]` |
 | **Arguments** | `name` (required) — database name |
 | **Flags** | `--quiet`, `-q` — print only the connection string (scripting) |
-| **Output** | psql-compatible connection string via the Dibbla database proxy, authenticated with your **personal API token** as the password (for human/CLI use). Deployed apps don't use this — they read the auto-injected `DATABASE_URL_<NAME>` secret. **This is the URL for running an app on your own machine against its Dibbla database:** the injected value that `env pull` writes can be a cluster-internal host that does not resolve outside Dibbla (see env pull → "Database from your machine"). Host and `sslmode` are derived from `DIBBLA_API_URL`: the `api.` host maps to the matching `db.` host on the same base domain, so `api.dibbla.com` → `db.dibbla.com` (`sslmode=require`). `localhost`/`127.0.0.1` map to `sslmode=disable`. Override any of it with `DIBBLA_DB_HOST`, `DIBBLA_DB_PORT`, `DIBBLA_DB_SSLMODE`. |
+| **Output** | psql-compatible connection string via the Dibbla database proxy, authenticated with your **personal API token** as the password (for human/CLI use). That token is an account-wide credential: a person may print the URL at their terminal, but an AI agent uses `db connect` only inside `$(...)` — `psql "$(dibbla db connect <name> -q)"`, `export DATABASE_URL_<NAME>="$(dibbla db connect <name> -q)"` — and never prints its output, echoes it or writes it to a file. Deployed apps don't use this — they read the auto-injected `DATABASE_URL_<NAME>` secret. **This is the URL for running an app on your own machine against its Dibbla database:** the injected value is a secret, so `env pull` leaves `DATABASE_URL_<NAME>` empty and points here (see env pull → "Database from your machine"). Host and `sslmode` are derived from `DIBBLA_API_URL`: the `api.` host maps to the matching `db.` host on the same base domain, so `api.dibbla.com` → `db.dibbla.com` (`sslmode=require`). `localhost`/`127.0.0.1` map to `sslmode=disable`. Override any of it with `DIBBLA_DB_HOST`, `DIBBLA_DB_PORT`, `DIBBLA_DB_SSLMODE`. |
 
 ### TLS for application database clients
 
@@ -1257,13 +1322,19 @@ not a CLI bug.
 
 ### storage credentials
 
+A key of your own for one bucket, for your own tools (aws CLI, mc, rclone, SDKs). Dibbla mints it for the person running the command: it reads and writes that one bucket's objects and nothing else — not the bucket's settings, not another bucket — and it expires after an hour. It is the bucket counterpart of `db connect`, which uses your own login rather than the app's password.
+
+It is **not** the app's key. The app's `STORAGE_<NAME>_*` secrets are write-only and are neither read nor changed; your key expiring never affects the app, and `storage rotate` never affects your key.
+
 | Item | Details |
 |------|---------|
-| **Usage** | `dibbla storage credentials <name> [--deployment <alias>] [--quiet | -q]` |
-| **Arguments** | `name` (required) — bucket name |
-| **Flags** | `--quiet`, `-q` — print only the export lines (for `eval`) |
-| | `--deployment <alias>` — where the bucket's secrets are scoped (omit for org-global) |
-| **Output** | Shell `export` lines (`AWS_ENDPOINT_URL`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `DIBBLA_BUCKET`) read from the injected secrets, for human use with `aws`/`mc`/`rclone`: `eval "$(dibbla storage credentials mybucket -q)"`. There is no `storage connect` — S3 has no psql analog to wrap. |
+| **Usage** | `dibbla storage credentials <name> [-q]` |
+| **Flags** | `-q`, `--quiet` — print only the export lines, for `eval`. (`--deployment` is accepted and ignored: a key is per bucket.) |
+| **Output** | `export` lines for `AWS_ENDPOINT_URL`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN` and `DIBBLA_BUCKET`; without `-q`, also when the key expires. Errors go to stderr, so `eval` never runs one. |
+| **Use** | `eval "$(dibbla storage credentials my-uploads -q)" && aws --endpoint-url "$AWS_ENDPOINT_URL" s3 ls "s3://$DIBBLA_BUCKET"` — or `mc`, or `rclone … --s3-env-auth --s3-no-check-bucket --s3-endpoint "$AWS_ENDPOINT_URL"` (rclone would otherwise try to create the bucket, which the key may not). Expired? Run it again. |
+| **For an AI agent** | The output carries a secret key. Run it only inside `eval "$(…)"`, in the same command as the tool that uses it; never print it, write it to a file or show it to the person. |
+| **Who** | Developer, admin or owner — a viewer is refused. Every key is recorded on the platform (who, which bucket, until when), never the key itself. |
+| **Local run of the app** | The key carries a session token, so it fits the app's `STORAGE_<NAME>_*` lines only if the app's S3 client also sends `AWS_SESSION_TOKEN`. Otherwise point those lines at a local S3-compatible store, or run without the bucket. |
 
 ---
 
@@ -1275,7 +1346,7 @@ Secrets have three scopes:
 - **Deployment-wide** (`--deployment <alias>` or `-d <alias>`, no `--service`) — visible to every service in the deployment.
 - **Per-service** (`-d <alias> --service <name>` or `-s <name>`) — visible only to the named service container, not to its peers.
 
-Precedence at deploy time (highest wins): per-service > deployment-wide > global. So a `DATABASE_URL` set globally can be overridden for one deployment by `dibbla secrets set DATABASE_URL ... -d myapp`, and that in turn can be overridden for the worker container by `dibbla secrets set DATABASE_URL ... -d myapp --service worker`.
+Precedence at deploy time (highest wins): per-service > deployment-wide > global. So a `DATABASE_URL` set globally can be overridden for one deployment by `dibbla secrets set DATABASE_URL -d myapp`, and that in turn can be overridden for the worker container by `dibbla secrets set DATABASE_URL -d myapp --service worker` (each run by the person, value pasted at the hidden prompt — or `dibbla secrets request` with the same flags, for a link where the value is entered in the browser).
 
 `--service` requires `--deployment`. Setting `--service` without `-d` is rejected client-side. Service names follow the regex `^[a-z][a-z0-9-]{0,29}$`.
 
@@ -1293,10 +1364,34 @@ Precedence at deploy time (highest wins): per-service > deployment-wide > global
 | Item | Details |
 |------|---------|
 | **Usage** | `dibbla secrets set <name> [value] [-d <alias>] [-s <service>]` |
-| **Arguments** | `name` (required), `value` (optional — if omitted, read from stdin) |
-| **Flags** | `--deployment`, `-d` — attach to deployment; omit for global |
+| **Arguments** | `name` (required), `value` (optional — leave it out) |
+| **Flags** | `--deployment`, `-d` — attach to deployment; omit for global. Works for an alias that has not been deployed yet, so an app's secrets are set before its first deploy. |
 | | `--service`, `-s` — scope to a single service (requires `-d`) |
+| **The value** | Leave the argument out. At a terminal the CLI asks `Value for NAME (input hidden): paste it, then press Enter on an empty line:` and reads without echo, line by line up to the empty line — so a pasted multi-line key is read whole and nothing is left for the shell. Without a terminal it reads stdin to its end: a pipe, or a file — `dibbla secrets set TLS_KEY -d myapp < tls.key`. Surrounding whitespace is trimmed. A value given as the argument still works but prints a warning on stderr: it is in the shell history, and if an AI assistant ran the command, in its transcript. The value is never printed. |
+| **Who runs it** | The person, in their own terminal — or the console's Secrets page. An agent never supplies the value: it runs `secrets request` and hands the person the link. |
+| **Example** | `dibbla secrets set STRIPE_API_KEY -d myapp` · `dibbla secrets set NPM_TOKEN -d myapp -s web` |
 | **Notes** | Per-service secrets stack on top of deployment-wide and global; the higher-precedence value wins inside the service container. |
+
+### secrets request
+
+A link where the person enters a secret's value in the browser, signed in to the console. The value goes straight into the secrets store; it never passes through the terminal, the shell history or an AI assistant's transcript, and the command never sees it. **The agent's way to get a secret set** (DIB-1343).
+
+| Item | Details |
+|------|---------|
+| **Usage** | `dibbla secrets request <name> [-d <alias>] [-s <service>] [--title "…"] [--why "…"] [--wait] [--json]` |
+| | `dibbla secrets request --status <id> [--wait] [--json]` — a request made earlier (also a promotion from `env promote`) |
+| **Flags** | `--deployment`, `-d` / `--service`, `-s` — scope as for `secrets set`: omit `-d` for org-global; an alias that has not been deployed yet is fine |
+| | `--title` — the page's heading: what the secret is. Plain text, one line, at most 80 bytes; without it the page shows the name |
+| | `--why` — the page's paragraph: why the app needs it, where to find it. Plain text, at most 600 bytes |
+| | `--wait` — read the request every 3 s until it ends; stops a minute past the expiry at the latest. A few failed reads in a row (network, 5xx) are retried |
+| | `--status <id>` — read an earlier request instead of creating one; takes no name, `-d`, `-s`, `--title` or `--why` |
+| | `--json` — the server's document: `request_id`, `state`, `name`, `deployment_alias`, `service_name`, `title`, `explanation`, `replaces_existing`, `promotes_env`, `entry_url`, `created_at`, `expires_at`, `completed_at`, `cancelled_at`. Never a value. With `--wait`, one document per line: the request as created, then as it ended (`--status --wait`: only the end) |
+| **Output** | `Secret entry request for NAME (deployment shop).`, the sentence for the person — *Open this link and enter the value; it never passes through this terminal* — the link, `Request: sreq_…`, `Expires: <UTC time> (in 15 min)`, `Replaces: the current value of NAME.` when it does, and the `--status` command to check it |
+| **States** | `pending` (waiting for the person) → `saving` (they pressed Save) → `completed`; or `cancelled` (on the page) or `expired` (15 minutes). Only `completed` stored anything |
+| **Exit codes** | Create, or `--status` without `--wait`: `0` when the call succeeded, whatever the state. With `--wait`: `0` completed, `1` cancelled, `7` expired (or still not ended a minute past expiry). `3` `ROLE_FORBIDDEN` (a viewer), `4` `--status` of a request that is not yours, `5` bad name/scope/title/why — refused before any call |
+| **Who can open the link** | Only the person who made the request: signed in to the console, in the same organization, with a role that may write secrets at that moment. Anyone else sees "not found" — the link names nothing about the tenant |
+| **For an agent** | Run it **without** `--wait`, give the person the link (an agent's shell call shows output only when the command ends), then `dibbla secrets request --status <id> --wait`. Exit `0` → the secret is there; deploy or restart as the task needs. Exit `7` → ask whether to make a new request |
+| **Example** | `dibbla secrets request STRIPE_API_KEY -d shop --title "Stripe secret key" --why "Shop charges cards with it. Stripe dashboard → Developers → API keys."` · `dibbla secrets request --status sreq_… --wait` |
 
 ### secrets import
 
@@ -1304,12 +1399,12 @@ Precedence at deploy time (highest wins): per-service > deployment-wide > global
 |------|---------|
 | **Usage** | `dibbla secrets import <file> [-e KEY=value ...] [-d <alias>] [-s <service>] [--dry-run]` |
 | **Arguments** | `file` (required) — a `.env`-style file |
-| **Flags** | `--env`, `-e` — override a single `KEY=value` on top of the file (repeatable; file < `-e`) |
+| **Flags** | `--env`, `-e` — override a single `KEY=value` on top of the file (repeatable; file < `-e`). The value is typed on the command line, so this is a person's flag; an agent never passes it. |
 | | `--deployment`, `-d` — import into a deployment; omit for global |
 | | `--service`, `-s` — scope to a single service (requires `-d`) |
 | | `--dry-run` — list the keys that would be set (names + scope only, no values, no network) |
 | **Behaviour** | Bulk-loads every `KEY=value` into the secrets store **without a redeploy**. Every key is validated up front against `^[a-zA-Z][a-zA-Z0-9_]{0,127}$`; if any is invalid, nothing is sent. The server upserts, so import is idempotent and re-runnable. On a mid-loop API error it stops and reports how many succeeded and which key failed. **Values are never printed** — output is key names + a count. |
-| **Notes** | Keep the `.env` file **outside** the deploy directory (or in `.dibblaignore`): a `.env` in the deploy root is a pre-deploy guardrail blocker, stripped from VCS. |
+| **Notes** | Keep the `.env` file **outside** the deploy directory (or in `.dibblaignore`): a `.env` in the deploy root is a pre-deploy guardrail blocker, stripped from VCS. The file is one the person wrote: an agent may run the import, since it prints no value, but never opens the file. |
 
 ### `.env` file grammar (`--env-file`, `secrets import`)
 
@@ -1342,19 +1437,17 @@ Two things that bite:
 
 ### secrets get
 
+Removed. A secret is write-only: Dibbla never hands out its value — not to the CLI, not to any API, not to an AI assistant or MCP. The running app gets it in its environment.
+
 | Item | Details |
 |------|---------|
-| **Usage** | `dibbla secrets get <name> [-d <alias>] [-s <service>]` |
-| **Arguments** | `name` (required) |
-| **Flags** | `--deployment`, `-d` — for deployment-scoped secret |
-| | `--service`, `-s` — for per-service secret (requires `-d`) |
-| **Output** | Secret value only (pipeline-friendly) |
-| **Roles** | Reading a value needs the deploy roles (owner, admin, developer). A viewer can `secrets list` but gets `403 ROLE_FORBIDDEN` here — and from `env pull`, which follows the same rule. |
-| **Notes** | Returns the exact (deployment, service) row — there is no implicit fall-through. To see what a service container actually sees at runtime, values included, use `dibbla env pull --stdout -d <alias> [-s <svc>]`. |
+| **Usage** | `dibbla secrets get <name>` still exists only to explain this: it prints `a secret's value cannot be read back — secrets are write-only on Dibbla` and exits `1`. |
+| **Server** | `GET /secrets/{name}` answers `410 SECRET_VALUE_NOT_READABLE` to every client, older CLIs included. |
+| **Instead** | `dibbla secrets list [-d <alias>]` — which secrets exist; `dibbla secrets set <name> [-d <alias>]` — change one in your own terminal. When a task needs a secret's value, do not look for a way to read it: request it (`dibbla secrets request <name> -d <alias>`) and the person enters it on the page. Never have a secret value pasted through an AI assistant. |
 
 ## env
 
-Values live in Dibbla, names live in the code. Secrets and the variables the platform generates (`DATABASE_URL_*`, `STORAGE_*`, `DIBBLA_*`) are injected into the app when it runs; `.env.example` in the repository lists the names the app needs. `dibbla env pull` fetches the values to a local `.env.local` so the app can run on this machine — that file never goes back: `.gitignore`, the VCS filter and the push hook all refuse it.
+Values live in Dibbla, names live in the code. Variables and secrets are injected into the app when it runs; `.env.example` in the repository lists the names the app needs. An **env var** is not sensitive: stored as-is, its value may be read and used freely. A **secret** is write-only: Dibbla never hands out its value — not to the CLI, not to any API, not to an AI assistant; only the running app gets it. `dibbla env pull` fetches the variables' values and the secrets' names to a local `.env.local` so the app can run on this machine — that file never goes back: `.gitignore`, the VCS filter and the push hook all refuse it.
 
 ### env pull
 
@@ -1363,17 +1456,33 @@ Values live in Dibbla, names live in the code. Secrets and the variables the pla
 | **Usage** | `dibbla env pull [-d <alias>] [-s <service>] [--replace] [--stdout] [--json]` |
 | **App** | The app this folder is linked to (`dibbla clone` / `dibbla link` — the folder must be the repository root), or `--deployment <alias>` / `-d`. |
 | **Flags** | `--service`, `-s` — resolve one service's view of a multi-service app (its per-service secrets on top; `DIBBLA_SVC_*` as that container sees them) |
-| | `--replace` — rewrite `.env.local` from scratch instead of updating it in place |
-| | `--stdout` — print `KEY=value` lines to stdout instead of writing a file (`eval "$(dibbla env pull --stdout)"`); nothing is written, `.gitignore` is not touched |
-| | `--json` — print the API document: `{deployment_alias, service, variables:[{name, value, source}]}` with `source` ∈ `global` / `deployment` / `service` / `inline` / `platform` |
-| **What it resolves** | Exactly what the running container gets, same precedence: global secrets < deployment-wide < per-service (`-s`) < inline env (`deploy -e`, manifest `environment:`) < injected `DIBBLA_*` (`DIBBLA_ALIAS`, `DIBBLA_ENV`, `DIBBLA_AI_GATEWAY_URL`, `DIBBLA_SVC_*` …). `DATABASE_URL_*` and `STORAGE_*` are secrets the platform created, so they are in the set, with the value the running app gets. `DIBBLA_IDENTITY_TOKEN_FILE` is left out — it names a file that exists only inside the pod. |
-| **Database from your machine** | A pulled `DATABASE_URL_<NAME>` is the address the app uses **inside** Dibbla. Depending on the instance that is the public database proxy or a cluster-internal host (`….svc.cluster.local`) that does not resolve outside the cluster — a local run with the latter fails at startup with a DNS error (`no such host`, `NXDOMAIN`). For every local run, take the URL from `dibbla db connect <name> -q` instead — always the same database through the public proxy, authenticated with your own login — and set it in the start command, where it wins over the file: `docker run --env-file .env.local -e DATABASE_URL_MY_DB="$(dibbla db connect my_db -q)" …` (`-e` overrides `--env-file`), or `export DATABASE_URL_MY_DB="$(dibbla db connect my_db -q)"` before `npm run dev` / `go run .` (dotenv loaders — `dotenv`, `godotenv`, Next.js, Vite — do not override a variable that is already set). **Not into `.env.local`:** the next pull refreshes every key Dibbla knows and puts the internal host back. A local Postgres URL is set the same way, for the same reason. |
-| **The file** | `.env.local` in the current folder, mode 0600, first line `# Pulled from Dibbla — lives only on this machine; run 'dibbla env pull' again to refresh.` Without `--replace` an existing file is updated in place: keys Dibbla knows are refreshed where they stand, every other line (a local override, a comment) survives, new keys are appended sorted. |
+| | `--replace` — rewrite `.env.local` from scratch instead of updating it in place; it still keeps every secret line you filled in |
+| | `--stdout` — print the variables as `KEY=value` lines and each secret as a comment `# NAME is a secret: Dibbla never hands out its value`, instead of writing a file (`eval "$(dibbla env pull --stdout)"`); nothing is written, `.gitignore` is not touched |
+| | `--json` — print the API document: `{deployment_alias, service, variables:[{name, value, source}], secrets:[{name, source}]}` — `variables[].source` ∈ `inline` / `platform`, `secrets[].source` ∈ `global` / `deployment` / `service`; a secret never has a value |
+| **What it resolves** | Exactly what the running container gets, same precedence: global secrets < deployment-wide < per-service (`-s`) < inline env (`deploy -e`, manifest `environment:`) < injected `DIBBLA_*` (`DIBBLA_ALIAS`, `DIBBLA_ENV`, `DIBBLA_AI_GATEWAY_URL`, `DIBBLA_SVC_*` …). A name that is a secret in any scope is listed only as a secret, by name. `DATABASE_URL_*` and `STORAGE_*` are secrets the platform created, so they come by name only. `DIBBLA_IDENTITY_TOKEN_FILE` is left out — it names a file that exists only inside the pod. |
+| **Database from your machine** | `DATABASE_URL_<NAME>` is a secret, so it arrives as an empty line under the hint `# DATABASE_URL_<NAME>: for a connection of your own, use "$(dibbla db connect <name> -q)" in the start command — it carries your API token, so not in this file`. For a local run against the app's database, take the URL from `dibbla db connect <name> -q` — the same database through the public proxy, authenticated with your own login — and set it in the start command, where it wins over the file: `docker run --env-file .env.local -e DATABASE_URL_MY_DB="$(dibbla db connect my_db -q)" …` (`-e` overrides `--env-file`), or `export DATABASE_URL_MY_DB="$(dibbla db connect my_db -q)"` before `npm run dev` / `go run .` (dotenv loaders — `dotenv`, `godotenv`, Next.js, Vite — do not override a variable that is already set). That is the app's real data; for isolation, put a local Postgres URL on the line in `.env.local` instead — a secret line you filled in is never overwritten by a pull. A bucket's `STORAGE_<NAME>_*` keys are the app's and cannot be fetched; point those lines at a local S3-compatible store (`storage credentials` mints a person's own one-hour key for their tools — see there for when it fits these lines). |
+| **The file** | `.env.local` in the current folder, mode 0600, first line `# Pulled from Dibbla — lives only on this machine; run 'dibbla env pull' again to refresh.` Variables come with their values. Without `--replace` an existing file is updated in place: variables Dibbla knows are refreshed where they stand, every other line (a local override, a comment) survives, new variables are appended sorted. |
+| **Secrets** | By name only, under `# Secrets: Dibbla never hands out a secret's value. Set a development value for each one here.` — one empty `NAME=` line per secret the file does not name yet. Fill in development values of your own (a test key, a local database). A secret line that already has a value is the developer's own and is never overwritten, not even by `--replace`. The command names every such line it kept: a `.env.local` from a pull made before secrets became write-only holds the app's real secrets there — replace them with development values. |
 | **.gitignore** | If `.gitignore` in the folder has no `.env.local` line, one is appended (created if missing) and the command says so. The VCS filter strips the file from tarball deploys and the push hook refuses it on `git push` — three locks on the same door. |
-| **Output** | Names and counts only (`5 variable(s) from Dibbla (app shop) — 2 global, 2 app, 1 platform`), never values, plus the reminder that a local run with this file uses the app's real database and buckets. |
-| **Roles** | Owner, admin or developer — the same rule as `secrets get`. A viewer gets `403 ROLE_FORBIDDEN`. |
+| **Output** | Names and counts only, never values: `3 variable(s) from Dibbla (app shop) — 2 inline, 1 platform`, then `2 secret(s) by name only — Dibbla never hands out a secret's value; fill in development values (N already set here)`, the plain variables that look like secrets (`STRIPE_SECRET_KEY look like secrets but are plain env vars … Promote each to a secret with a new value: 'dibbla env promote NAME -d shop'`), the secret lines it kept with your values, and the `.gitignore` line if it added one. |
+| **Roles** | Owner, admin or developer. A viewer gets `403 ROLE_FORBIDDEN`. |
 | **Exit codes** | `0` written; `5` not a linked folder and no `-d`, or `--stdout` together with `--json`; API errors map like every other command (`403`/`404` → non-zero with the server's message). |
-| **New variable** | `dibbla secrets set NAME value -d <alias>` → add `NAME= # what it is` to `.env.example` → `dibbla env pull`. Never `.env.local` by hand as the only place: the running app would not have it. |
+| **New secret** | The value goes in through `dibbla secrets request NAME -d <alias>` (the person enters it on the page; or their own `dibbla secrets set`, or the console — never pasted through an AI assistant) → add `NAME= # what it is` to `.env.example` → `dibbla env pull` adds the empty line → fill in a development value. Never `.env.local` by hand as the only place: the running app would not have it. |
+
+### env promote
+
+Turns a plain env var into a secret (DIB-1340). A plain env var is readable by anyone who can read the app's configuration, so its current value counts as exposed: the person rotates it where it was issued and enters the **new** value on the page the command links to. Dibbla then stores the secret, removes the env var and restarts the app. The value never passes through the terminal.
+
+| Item | Details |
+|------|---------|
+| **Usage** | `dibbla env promote <name> [-d <alias>] [-s <service>] [--title "…"] [--why "…"] [--wait] [--json]` |
+| **App** | The app this folder is linked to, or `--deployment <alias>` / `-d`. `--service`, `-s` — the service whose variable it is, in a multi-service app |
+| **Flags** | `--title`, `--why`, `--wait`, `--json` as on `secrets request`. Without `--why` the page says the old value is exposed and asks for a new one. The state is read later with `dibbla secrets request --status <id> [--wait]` |
+| **Candidates** | The variables `dibbla env pull` names as looking like secrets |
+| **Output** | `Promotion requested: NAME (deployment shop) becomes a secret.`, that the value is to be treated as exposed, *Rotate it where it was issued, then open this link and enter the NEW value; it never passes through this terminal*, the link, request id, expiry, and `Then: the env var NAME is removed and the app restarts with the secret. The page refuses the unchanged value.` With `--wait` and completion: `NAME … is a secret now: the env var is removed and the app restarts with the new value.` |
+| **Refusals** | `ENV_VAR_NOT_FOUND` (404, exit `4`) — no plain env var of that name on the app/service: check the case, and `--service`. `ENV_FROM_MANIFEST` (409, exit `6`) — the variable is in `dibbla.yaml` `environment:`, where the next deploy would put it back: remove the line, `dibbla secrets request <name> -d <alias>` for a new value, then deploy. `ROLE_FORBIDDEN` (exit `3`) — a viewer. On a Dibbla server without promotion the command says so and hands out no link (exit `1`) |
+| **Exit codes** | As `secrets request`; `5` also for a folder that is not linked when `-d` is not given |
+| **Example** | `dibbla env promote STRIPE_SECRET_KEY -d shop --title "Stripe secret key" --why "Roll the key in the Stripe dashboard first: the old one was visible as a setting."` |
 
 ### secrets delete
 
@@ -1837,11 +1946,13 @@ Alias: `fn`.
 | Db | `dibbla db delete <name>` | Delete database |
 | Db | `dibbla db dump <name> [-o file]` | Download dump |
 | Db | `dibbla db restore <name> -f <file>` | Restore from dump |
-| Db | `dibbla db connect <name> [-q]` | Print connection string |
+| Db | `dibbla db connect <name> [-q]` | Connection string — its password is your API token; an agent uses it only inside `$(...)` |
 | Secrets | `dibbla secrets list [-d alias]` | List global or app secrets |
-| Secrets | `dibbla secrets set <name> [value] [-d alias]` | Create/update secret |
+| Secrets | `dibbla secrets request <name> [-d alias] [--title …] [--why …]` | A link where the person enters the value — the agent's way; `--status <id> --wait` to wait |
+| Secrets | `dibbla secrets set <name> [-d alias]` | Create/update secret — run by the person, value at a hidden prompt |
+| Env | `dibbla env promote <name> [-d alias]` | Plain env var → secret, with a new value entered on a page; env var removed, app restarted |
 | Secrets | `dibbla secrets import <file> [-d alias] [--dry-run]` | Bulk-load a `.env` file into secrets (no redeploy) |
-| Secrets | `dibbla secrets get <name> [-d alias]` | Print secret value |
+| Secrets | `dibbla secrets get <name>` | Removed — secrets are write-only; explains and exits 1 |
 | Secrets | `dibbla secrets delete <name> [-d alias]` | Delete secret |
 | Workflows | `dibbla workflows list` | List all workflows |
 | Workflows | `dibbla workflows get <name>` | Get workflow definition |
