@@ -420,9 +420,14 @@ Commands: `dibbla apps maintenance status|enable|disable|run|runs` and
 
 ### Two switches, both off by default
 
-1. **Org capability.** Feature-gated per organization. When it is off, every
-   maintenance call is a `404` with `MAINTENANCE_AGENT_NOT_FOUND` (CLI exit 4).
-   That is the rollout, not a missing app — do not send the user to `apps list`.
+1. **Org capability: the Maintenance Agent add-on.** An owner or admin adds it
+   on the console's Plan page (`/org-settings/plan`): 300 kr/month per
+   organization, Business only, all AI inference included — runs never draw
+   from AI credits and there is no own key to bring. When the organization
+   does not have it, every maintenance call is a `404` with
+   `MAINTENANCE_AGENT_NOT_FOUND` (CLI exit 4). That is the add-on, not a
+   missing app — do not send the user to `apps list`; send an owner/admin to
+   the Plan page.
 2. **Per-app enablement.** `dibbla apps maintenance enable <alias>` (owner/admin)
    turns this app on. Shipping code does not start anything. `disable` stops new
    runs and keeps history readable.
@@ -740,6 +745,7 @@ something on the caller's own machine that no remote call can reach:
 | `cli.ai_gateway`, `cli.mcp_client_config` | `ai …`, `mcp …` | Answers about the calling machine's environment and its agent's config file. |
 | `cli.admin` | `admin reconcile` | Gated by `DIBBLA_ADMIN_TOKEN`, an operator marker that lives outside the OAuth grant model entirely. |
 | `cli.admin.models` | `admin models list`, `admin models set`, `admin models delete` | Edits the platform-wide model catalog in the AI gateway, which only a Dibbla global admin may do. That is an operator authority no OAuth scope carries, and the catalog is not a tenant's resource. |
+| `cli.admin.costs` | `admin costs`, `admin hosting-cost list/set/delete` | Reads what every organization's AI calls and hosting cost Dibbla, and keeps what the cluster costs a month, which only a Dibbla global admin may do. The report spans every tenant, and an OAuth grant is consent for one organization. |
 
 There is nothing else. Every other CLI capability is reachable through
 `/platform` today; a gap is a `not-yet-available` row with an owner and a work

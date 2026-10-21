@@ -179,12 +179,10 @@ Status:  ✅ logged in
 The `Folder`/`App`/`Sync`/`Running` lines appear only inside a linked folder.
 
 The `Plan` line appears only when the validated organization has a plan
-(P-0027); trials read `Plan:    trial (ends 2026-09-21T00:00:00Z)` with
-`upgrade: run dibbla upgrade for a payment link` on the next line. In the
-trial's last seven days it reads `Plan:    trial (ends in 3 days, Oct 1)` with
-the console's `upgrade:` link on the next line and `or run dibbla upgrade …`
-under it, and after the end `trial (ended Oct 1 — …)` with the same two lines. Under `--no-validate` no network call is made, so no plan
-is shown.
+(P-0027): `Plan:    Hobby`, `Plan:    Business` or `Plan:    Enterprise`.
+Hobby is free and does not end; it adds
+`upgrade: run dibbla upgrade to move to Business` on the next line. Under
+`--no-validate` no network call is made, so no plan is shown.
 
 The `Org` line reads `account default (none selected)` when no organization has
 been selected — see [org](#org).
@@ -208,9 +206,10 @@ been selected — see [org](#org).
 ```
 
 `validation_error` is added when a token was rejected; omitted otherwise.
-`plan` and `trial_ends_at` are present only when validation ran and the
-organization has a plan. A trial adds `trial_days_left` (never negative),
-`trial_ended`, `upgrade_url` and `upgrade_command` (`"dibbla upgrade"`).
+`plan` is present only when validation ran and the organization has a plan:
+the stored name — `hobby`, `standard` (shown as Business) or `enterprise`. A
+Hobby organization adds `upgrade_url` (the console's upgrade page, when the
+server names it) and `upgrade_command` (`"dibbla upgrade"`).
 `org_id` / `org_name` are omitted when no organization is selected, in which
 case `org_source` reads `none (account default)`. `org_name` is also absent
 when the organization came from `--org` or `DIBBLA_ORG_ID`, which carry an id
@@ -231,11 +230,12 @@ dibbla status --json | jq '.api_url'   # script-friendly endpoint extraction
 ## upgrade
 
 Print a Stripe Checkout link that upgrades the organization the CLI acts as
-from its trial (running or ended) to Business — the same link the console's
+from Hobby to Business — the same link the console's
 Plan tab and a connected agent (`platform_whoami upgrade=true`) hand out.
 Nothing changes until the payment goes through: the link opens Stripe's
-checkout and expires unused after 24 hours. Right after payment, deploys work
-again; running apps and data are untouched either way.
+checkout and expires unused after 24 hours. Right after payment, Business
+applies, with no limit on apps or databases; running apps and data are
+untouched either way.
 
 | Item | Details |
 |------|---------|
@@ -574,14 +574,7 @@ For the manifest schema, env-aware fields, profiles, service discovery, NetworkP
 | `INVALID_HEALTHCHECK` / `MISSING_HEALTHCHECK` | Healthcheck declaration violates the schema (multiple probes / missing required fields) | See manifest.md § 12 |
 | `HEALTHCHECK_FAILED` / `HEALTHCHECK_TIMEOUT` | Probe didn't pass at deploy time | Check pod logs; relax `failure_threshold` / `initial_delay_seconds` for slow boots |
 | `SERVICE_NAME_TOO_LONG` | Computed K8s name `{alias}-{service}` exceeds 63 chars | Shorten the alias or service name |
-| `PLAN_LIMIT_EXCEEDED` | The org's plan is at its app or database limit (checked BEFORE any upload/build) — an at-limit org can always still redeploy its existing apps | Remove an app/database, or upgrade: show the user the link the error names (`upgrade_url` in `--json`) — do not retry; the error's `Docs:` line links https://docs.dibbla.com/reference/plans |
-| `TRIAL_EXPIRED` | The org's free trial has ended; deploys and creates gate while running apps keep serving | Show the user the upgrade link the error names (`upgrade_url` in `--json`, also printed in the message) and stop — do not retry; the gate lifts immediately on payment. The message ends with `Or get the payment link right here: dibbla upgrade` (`upgrade_command` in `--json`): run [`dibbla upgrade`](#upgrade) to hand an owner/admin a Stripe Checkout link directly. Also refuses `git push` to main (same text on the `remote:` lines) |
-
-**Trial heads-up (not an error).** In a free trial's last seven days a
-successful deploy ends with `Heads-up: your free trial ends in N days (…)` and
-the upgrade link (`trial_warning` in `--json`; on a `git push` it is on the
-`remote:` lines). The deploy worked — tell the user once, with the link, and
-carry on.
+| `PLAN_LIMIT_EXCEEDED` | The org is on Hobby and at its app or database limit (checked BEFORE any upload/build) — an at-limit org can always still redeploy its existing apps, and what already runs keeps running | Remove an app/database, or upgrade to Business: show the user the link the error names (`upgrade_url` in `--json`) — do not retry; the error's `Docs:` line links https://docs.dibbla.com/reference/plans. The message ends with `Or get the payment link right here: dibbla upgrade` (`upgrade_command` in `--json`): run [`dibbla upgrade`](#upgrade) to hand an owner/admin a Stripe Checkout link directly. Also refuses `git push` to main (same text on the `remote:` lines) |
 
 **Secret-looking `environment:` (not an error, not fine either).** When a
 `dibbla.yaml` `environment:` entry looks like a secret, a person's deploy goes
@@ -1070,8 +1063,8 @@ dibbla notifications history [--app <alias>] [--limit 1-100] [--json]
   to your linked Slack account; no `--target`. `--org-wide` (owners and
   admins) adds the organization's subscription: `--app` optional (omit for
   every app), `--target` required for email, other channels use the
-  organization's connected integration. Pipeline and trial events are not about
-  one app, so they are `--org-wide` only. Adding an existing subscription again
+  organization's connected integration. Pipeline and other organization events
+  are not about one app, so they are `--org-wide` only. Adding an existing subscription again
   updates its severity and digest (and re-enables an unsubscribed one).
   `--test` sends a test straight after.
 - **`--severity`** — the lowest severity delivered: `info` < `attention`
@@ -1904,6 +1897,32 @@ Alias: `fn`.
 | **Behavior** | Calls the function directly, outside any workflow, synchronously (the engine waits up to 30 s) and records a tool invocation with source `cli`. Same endpoint and body as the connector's `platform_tools action=invoke`. Refusals: not registered / not exposed / disabled are one 404 (exit 4) on purpose; a min role above yours is 403 (exit 3); a function that fails is 502 with its error, recorded in the ledger (`fn invocation <id> --logs`); a timeout is 504 and the invocation is recorded as timed out; inputs over 64 KiB are 400. |
 
 **Agent guidance:** exposing is a policy decision for an admin, not a step in workflow authoring — a function does not need to be exposed to be used in a workflow. Reach for `fn exposed` / `fn invocations` when someone asks "which of our functions can agents call directly" or "who called this tool, and what happened".
+
+---
+
+## Data sources
+
+An admin exposes a managed data source to agents (Console → MCP, with a min role); the source's search configuration and `filter_schema` decide what a query can search and filter on. These commands call the same endpoints as the `platform_data_sources` tool on the Dibbla MCP connector, so they return the same answers. Alias: `ds`.
+
+### datasource list
+
+| Item | Details |
+|------|---------|
+| **Usage** | `dibbla datasource list` |
+| **Output** | Table: ID, NAME, MIN ROLE, FILTERS, DESCRIPTION (default); YAML/JSON with `-o` adds `capabilities`, `examples` and `search_targets` |
+| **Behavior** | Lists the sources you can query: exposed, switched on, and with a min role your organization role meets. FILTERS is the source's `filter_schema` — the only columns a query can filter on — as `column (type)`; `-` means none. ID is the `source_id` a query takes. |
+
+### datasource query
+
+| Item | Details |
+|------|---------|
+| **Usage** | `dibbla datasource query <id> "<question>" [--filter column=value]… [--top-k N] [--target label] [--min-score 0–1]` |
+| **Arguments** | `id` — a source from `datasource list`; `question` — natural language, at most 1000 characters |
+| **Flags** | `--filter column=value` — equality on a declared column; repeat for the same column to allow any of several values, for different columns to require all. `--top-k` — 1–20, default 10 (20 is the search engine's cap, shared with workflow agents; above it the CLI refuses rather than silently returning 20). `--target` — search one search target only (label or table). `--min-score` — drop hits below this similarity. |
+| **Output** | YAML (default) or JSON with `-o json`: `invocation_id`, `status`, `top_k`, `count`, `truncated`, and `results` (each with `id`, `title`, `metadata` holding the content columns, `_score` and `_table`) |
+| **Behavior** | Semantic search: the question is embedded with the source's own model on the platform. Answers are capped at 16 KiB — long values are shortened, then the last hits dropped; a cut answer has `truncated: true` and a `truncation_note`, which the CLI repeats on stderr. Refusals: unknown / not exposed / switched off are one 404 (exit 4) on purpose; a min role above yours is 403 (exit 3); a filter on an undeclared column is 400 naming the filterable ones; too many queries for the organization is 429. Every query past those checks is recorded as a tool invocation with source `cli` — not a run, and not listed by `functions invocations`, which shows function calls only. |
+
+**Agent guidance:** there is no free SQL here, by design — a source returns only what its search configuration exposes. Run `datasource list` first to see which columns can be filtered on, then query with filters on exactly those.
 ---
 
 ---
@@ -1982,3 +2001,5 @@ Alias: `fn`.
 | Functions | `dibbla functions invocations [filters]` | List calls made to exposed functions |
 | Functions | `dibbla functions invocation <id> [--logs]` | Show one call, optionally with its logs |
 | Functions | `dibbla functions invoke <server> <name> [--input <json> \| -f <file>]` | Call an exposed function directly (source `cli`) |
+| Data sources | `dibbla datasource list` | Data sources you can query, with their filterable columns |
+| Data sources | `dibbla datasource query <id> "<question>" [--filter col=value] [--top-k N]` | Semantic search in an exposed data source (source `cli`) |
