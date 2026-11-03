@@ -125,7 +125,7 @@ The shell installer drops the binary into `~/.local/bin` and adjusts `PATH` if n
 | Export     | `export <alias> [--out <dir>]` — everything the app keeps on Dibbla into one directory in standard formats: `source/` (git), `databases/<name>.dump` (pg_dump custom), `buckets/<name>/` (one file per object), `env/*.env` (variables with values, secrets by name only — secret values are not part of an export; `--include-secrets` is refused with exit 5), `dibbla.yaml`, a `docker-compose.yml` that runs it all locally (Postgres restored from the dumps, MinIO seeded from the buckets), `README.md`, `dibbla-export.json`. Read-only: the app keeps running. For leaving Dibbla or keeping an offline copy. Full table in `reference.md` → export |
 | Manifest   | `manifest validate [path]` — local schema check for `dibbla.yaml` (no network) |
 | Preview    | `preview [path] [--target-env <env>] [--profile <p>] [--no-public]` — server-authoritative dry run; full env-aware resolution + quota check, no build, no apply |
-| Apps       | `apps list`, `apps get <alias>` = `apps card <alias>` `[--json|--review]` (one app: URL, status, the git commit it runs, size, health, login policy, the security section — review and the version it applies to, scan findings and when they last changed, maintenance agent standing, proposals waiting — per-service breakdown), `apps update <alias> [--env-file <file>]`, `apps delete <alias>`, `apps restart <alias> --service <name>` (per-service rolling restart) |
+| Apps       | `apps list`, `apps get <alias>` = `apps card <alias>` `[--json|--review]` (one app: URL, status, the git commit it runs, size, health, login policy, the security section — review and the version it applies to, scan findings and when they last changed, maintenance agent standing, proposals waiting — per-service breakdown), `apps update <alias> [--env-file <file>]`, `apps delete <alias>`, `apps restart <alias> --service <name>` (per-service rolling restart), `apps top <alias>` (CPU and memory each pod uses now next to its request and limit — size `cpu`/`memory` on it; `START-UP` = still includes boot cost) |
 | Checks     | `apps checks list <alias> [--json]`, `apps checks run <alias> [--check <id>] [--async\|--follow] [--quiet\|--json]`, `apps checks history <alias> [--check <id>] [--since 24h] [--limit N] [--json]`, `apps checks enable\|disable <alias> [--yes]` — application checks (dibbla-checks.yaml). Alias positional, check id via `--check`. `run` exits with the **product outcome**: 0 pass, 8 fail, 9 error, 10 indeterminate, 12 canceled, 13 skipped_concurrent (transport keeps 1/3/4/5/6/7) — gate CI on the code, not on output text. `run --follow --json` is NDJSON with exactly one terminal `summary` line carrying `outcome` + `exit_code` |
 | Maintenance | `apps maintenance status <alias> [--json]`, `apps maintenance enable\|disable <alias> [--yes]`, `apps maintenance run <alias> [--async\|--follow] [--quiet\|--json] [--mode nightly\|check-triage] [--check-run <id>] [--idempotency-key <key>]`, `apps maintenance runs <alias> [--limit N] [--json]` — overnight agent that reads logs, source and check history. Org off is `404 MAINTENANCE_AGENT_NOT_FOUND` (exit 4). `run` product exits: 0 found_nothing/proposed/budget_exhausted/skipped/cancelled, 11 finding_recorded (transport 1/3/4/5/6/7). `--follow --json` is NDJSON with exactly one terminal `summary`. Reusing `--idempotency-key` replays the same execution |
 | Proposals  | `apps proposals list <alias> [--json]`, `apps proposals show <alias> <proposal-id> [--diff] [--json]`, `apps proposals approve\|deny\|retry <alias> <proposal-id> [--yes]` — change queue. Eligibility is the API `decision` object; the CLI never computes who may approve. Four-eyes: the maintenance author cannot approve its own proposal. `--diff --json` is one `type: proposal_review` document with unmodified `proposal` and `diff` API objects |
@@ -375,3 +375,26 @@ Full model — the decision table against the other schedule-shaped surfaces, th
 - **User handbook (end-user docs):** see [user-docs.md](user-docs.md) for the `docs/` folder convention, `_nav.yaml` sidebar ordering, the single-file `APP.md` fallback, audience and tone rules, cross-linking syntax, paste-ready templates (Welcome / Getting Started / FAQ / Features), and the list of things that must **never** appear in user docs (dev stack, env vars, deploy commands, infra). Read this whenever you scaffold a new project, when you're about to call `dibbla deploy`, or when the user asks "how do I document this for end users".
 
 When suggesting or generating `dibbla` commands, use the reference for exact syntax and the examples for typical workflows. For "is my app ready for Dibbla?" questions, start in `platform.md`. For "build / iterate / debug a workflow" questions, start in `workflows.md`. For "implement a Go function/job for the platform" questions, start in `sdk-go.md`.
+
+
+## CPU and memory: request and limit
+
+Use `cpu_request`, `cpu_limit`, `memory_request`, and `memory_limit` separately in each `dibbla.yaml` service or job. Example:
+
+```yaml
+services:
+  web:
+    image: nginx:alpine
+    port: 80
+    public: true
+    cpu_request: 100m
+    cpu_limit: '1'
+    memory_request: 1Gi
+    memory_limit: 2560Mi
+```
+
+The equivalent flags on `dibbla deploy` and `dibbla apps update <alias>` are `--cpu-request 100m --cpu-limit 1 --memory-request 1Gi --memory-limit 2560Mi`. Use `--service web` for an app with multiple services; one service is selected automatically. Deploy resource flags also work with a manifest. Use `dibbla apps top <alias>` to inspect current consumption, request, and limit before sizing.
+
+For each value, explicit service settings win over organization resource defaults, which win over platform defaults (CPU request 50m / limit 1000m, memory request 64Mi / limit 512Mi, capped for your plan). When only request or only limit is supplied, the other half inherits these defaults; it does not keep the running app's previous value. Request must be no greater than limit. The shorthand `cpu` / `memory` (and `--cpu` / `--memory`) still sets both request and limit; combining a shorthand with either separate field for the same dimension is an error.
+
+A service is throttled above its CPU limit; exceeding the memory limit can cause an out-of-memory kill. A memory request below a quarter of its limit warns about eviction risk under node memory pressure but does not block the deploy. Keep requests realistic for steady use and leave limits enough room for peaks.

@@ -199,7 +199,7 @@ Every service container in a multi-service deploy receives a fixed env-var set:
 
 | Habit | What happens |
 |---|---|
-| `dibbla deploy --cpu 500m --memory 512Mi --port 3000` | These flags are **ignored** when a manifest is present. CPU/memory/port live in the manifest. |
+| `dibbla deploy --cpu 500m --memory 512Mi --port 3000` | CPU/memory flags set request and limit, including with a manifest; `--cpu-request/--cpu-limit/--memory-request/--memory-limit` set them separately. Select `--service` for multiple services. Set the port in the manifest. |
 | `dibbla apps update --replicas N` | Returns `PATCH_AMBIGUOUS` (which service?). Edit `dibbla.yaml` and redeploy with `--update` instead. |
 | `dibbla apps update --port N` | Same — port is per-service. Edit the manifest. |
 | Hard-coding cluster DNS (`http://myapp-redis:6379`) in app source | Brittle across alias renames + breaks if the service name changes. Use `${DIBBLA_SVC_REDIS_URL}` instead. |
@@ -683,7 +683,7 @@ the step.
 |---|---|---|
 | Know who and where you are, and which organizations you belong to | `platform_whoami` | — |
 | See what you can build with: templates, workflow functions, providers | `platform_catalog` | `kind` |
-| List apps, read one, read its maintenance settings and runs, list or verify its custom domains | `platform_apps` | omit `alias` to list; `view: maintenance` \| `domains` (+ `hostname` to verify one) |
+| List apps, read one, read its maintenance settings and runs, list or verify its custom domains, see what its pods use of CPU and memory (`apps top`) | `platform_apps` | omit `alias` to list; `view: maintenance` \| `domains` (+ `hostname` to verify one) \| `usage` |
 | Read an app's logs | `platform_app_logs` | — |
 | See an app's checks, or what they found | `platform_app_checks` | `view: definitions` \| `history` |
 | Run checks now, or one maintenance run | `platform_app_run` | `kind: checks` \| `maintenance` |
