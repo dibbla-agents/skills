@@ -826,7 +826,7 @@ Show one deployment's record — the app's card, as the console and the connecto
 | **Flags** | `--json` — print the raw API document verbatim. `--review` — print the REVIEW.md the running app was deployed with, and nothing else (exit 1 when there is none) |
 | **Output** | Default: URL, status, deployed/updated times, the commit the app runs (`Commit:`), replicas, size, health, login policy, then a **Security** section: `Review:` the guardrails status (OK / warnings / blockers found / none) with **the version it was written for** and when, plus a warning when the running version is newer than the review; `Scan:` the build-time scan's findings (leaked secrets, then critical/high/medium/low) with when the finding set last changed; `Agent:` whether the maintenance agent is on and whether anything has changed since it last looked, its last run, and proposals waiting for a decision. For multi-service apps a per-service breakdown with ready/replica counts and a `stateful` marker. When the app's `main` is ahead of the running commit (a `git push` whose deploy failed or is still building), a `Main: <sha> — NOT running` block follows with the failure (`BUILD_FAILED — …`) and the `dibbla deploy status <id>` to read; the fix is a new commit, never a rewind |
 | **Errors** | `404` exit 4 with a hint to `apps list`; `401/403` exit 3 |
-| **Notes** | The Security section is absent on a server that predates it (it is not "no review"). "Nothing has changed since the agent last looked" means neither the running version nor the scan's finding set is newer than the last maintenance run. Findings **per severity and per package** are in `--json` under `security.scan` only as a tally; the list itself is the API's `GET /deployments/{alias}/security-scan` |
+| **Notes** | The Security section is absent on a server that predates it (it is not "no review"). "Nothing has changed since the agent last looked" means neither the running version nor the scan's finding set is newer than the last maintenance run. Findings **per severity and per package** are in `--json` under `security.scan` only as a tally; read the complete list with `dibbla apps findings <alias> --all --json` |
 
 **Examples:**
 ```bash
@@ -2066,3 +2066,116 @@ An admin exposes a managed data source to agents (Console → MCP, with a min ro
 | Functions | `dibbla functions invoke <server> <name> [--input <json> \| -f <file>]` | Call an exposed function directly (source `cli`) |
 | Data sources | `dibbla datasource list` | Data sources you can query, with their filterable columns |
 | Data sources | `dibbla datasource query <id> "<question>" [--filter col=value] [--top-k N]` | Semantic search in an exposed data source (source `cli`) |
+
+### Complete Security scan findings
+
+`dibbla apps findings <alias> --all --json` reads every finding from the existing
+Security scan. It does not start a scan or change anything. Report `status`,
+`errors`, revision, timestamps and `running` with the findings. A missing,
+unavailable, running, partial or failed scan is never clean, and an older report
+with `running=false` says nothing definitive about the running revision.
+
+For manual pagination use `--limit 1..200` (default 50), then pass `next_cursor`
+as `--cursor` until `has_more=false`. Keep the filters unchanged. `--min-severity`
+keeps that severity and above including secrets; `--fixable-only` keeps fixable
+vulnerabilities plus secrets. `--kind vulnerability|secret`, `--service <name>`
+(excludes source secrets) and `--deployment-id <revision>` narrow the request.
+The JSON contains all package/version/service/severity/advisory/fix facts and
+safe secret locations. Never infer completeness from the first page's count.
+
+`SCAN_CHANGED` (exit 6) requires discarding all pages and starting again.
+`--all` buffers pages and emits nothing if one fails; it cannot be combined with
+`--cursor`. Exit 0 means successful reading, not a clean scan. No local scanning
+software, build or deployment is needed for this read.
+
+### Temporary Security scan of source
+
+For the complete correction loop, first read all deployed findings with
+`dibbla apps findings myapp --all --json`, then scan the unchanged local source
+as a baseline. Make only the change the user authorized, scan the changed
+source, compare the two still-available reports and end both runs. Keep coverage,
+database changes and what needs a build in the explanation. No local scanner
+installation is needed. The MCP connector has the same lifecycle for clients
+with file access; use its own connector skill for the upload procedure.
+An ordinary deployment remains a separate action and creates a fresh image and
+secret report, rather than promoting either test result.
+
+For an existing app, test an archive without deployment:
+
+```sh
+dibbla apps scan start myapp --archive source.tar.gz --json
+dibbla apps scan status myapp <scan-id> --json
+dibbla apps scan result myapp <scan-id> --json
+dibbla apps scan compare myapp <base-scan-id> <head-scan-id> [--image] --json
+dibbla apps scan end myapp <scan-id> --json
+```
+
+Create a tar.gz of the code to inspect, containing regular files/directories
+only. Do not install packages or execute project scripts to prepare it. Keep the
+request ID printed on stderr: after a lost response, repeat `start` with the
+same archive and `--request-id <request-id>`. Changed code needs a new ID.
+An interrupted or failed scan is not clean; read `status` and `error_code` and
+use a new request ID if another scan is needed. `--json` includes API errors.
+
+Coverage is secrets and lock-file dependencies. Secrets report file, line and
+rule, never the value. Dependencies are read from the archive's lock files
+without installing anything; each vulnerability names `package`, `version`,
+`fixed_in`, the `file` it was declared in and the `service`. Verified with real
+files: `package-lock.json`, `pnpm-lock.yaml`, `bun.lock`, `go.mod`, `uv.lock`,
+and `requirements*.txt` with exact `==` pins. Read `dependencies.status` and
+`dependencies.gaps` before concluding anything: `partial`, `failed` or
+`no_dependency_files` means some files were not checked (for example
+`bun.lockb`, a `package.json` without a lock file, unpinned requirements). To
+check a fix, update the lock file (not only the manifest), make a new archive,
+start a new scan, and run `compare` (below). Image/OS packages, the language
+runtime and dependencies resolved during a build, nested archives, encoded
+secrets and git history are not checked. Do not call existing deployed findings
+resolved because they are absent here. This does not build or deploy and does not change
+the running app's report, finding status or notifications. Ordinary deployment
+still produces the deployed revision's full Security scan.
+
+**Comparing two scans (the fix loop).** Scan before the change (base), change
+the code and lock files, scan again (head), then while both runs still exist:
+`dibbla apps scan compare myapp <base-id> <head-id> --json`. Each entry in
+`findings` has a `change`:
+
+- `new` / `persisting` / `not_detected` — only where both reports fully read the
+  file. A dependency is matched by service, package and advisory, not version:
+  a bump that still carries the advisory is `persisting` with
+  `base_dependency.versions` and `head_dependency.versions`; bump further to
+  `fixed_in`.
+- `unverifiable` — in base, but head could not check it (`reason`: the file is
+  gone, a gap code such as `INCOMPLETE_VERSIONS`, or a failed dependency part).
+  It is **not fixed**; restore coverage and scan again.
+- `newly_covered` — head found it in a file base did not fully read; it was not
+  introduced by your change.
+
+`attribution` on `new`/`not_detected` is `submitted_code` only when
+`comparable.database` is `same` (or not needed) and the scanners match;
+otherwise it is `submitted_code_or_database` / `submitted_code_or_scanner`, and
+`limitations` explains why. Report those as "not detected, possibly because the
+vulnerability database changed", never as fixed by you. A `not_detected` secret
+may still be valid and in git history: tell the owner to rotate it.
+
+`--image` adds `image`: the running app's stored image SBOM re-matched against
+today's database, with `origin.deployment_id`/`commit_sha` and the database
+date. These are the deployed images' findings, not your submitted code's.
+`in_head_source: present` means the head source report still shows the same
+advisory; `absent` or `os_package` means only a deployment and its Security
+scan can verify it. **Image/OS findings are never resolved by a source report.**
+`image.status: missing_sbom` says no SBOM is kept — then nothing about the
+images is known. Nothing is built or deployed, and the app's Security scan,
+findings and notifications are unchanged.
+
+The comparison is not stored. A missing, expired, ended or unfinished report
+fails with `SCAN_GONE` (410) or `SCAN_NOT_COMPLETED` (409) naming `base` or
+`head` — never an empty comparison; start a new scan. When you have the result,
+end both runs.
+
+Read the report as often as needed, then **always run `end`**. End removes all
+server copies. The default absolute TTL is 60 minutes from creation; polling
+and retries do not extend it. Gone/expired reports are errors, never empty
+findings. There is no permanent test history. Limits: 50 MiB compressed,
+200 MiB expanded including headers, 10,000 entries, two minutes for upload and
+scan, two simultaneous scans globally, four unclosed runs per organization.
+A successful command is not a guarantee that no secrets were found.
