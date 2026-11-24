@@ -26,7 +26,7 @@ A workflow is a **directed acyclic graph of typed function calls**.
 
 - **Nodes are function calls.** Each non-trivial node names a `function` from the registry (e.g. `handlebars_template`, `reasoning_agent_function`, `get_weather_function`); when invoked, the workflow server calls that function with input values and stores the outputs.
 - **Edges carry typed data, port-to-port.** An edge says "feed this output of node A into that input of node B." Edges have **no conditions** — data always flows when it's available.
-- **Activation is push-based.** A node fires the moment all its non-optional inputs have a value (either from an edge, a hardcoded value, or an API request body). There is no scheduler, no orchestrator. If an input has no provider, the node never fires — that's the most common silent failure.
+- **Activation is push-based.** A node fires the moment all its required inputs have a value (either from an edge, a hardcoded value, or an API request body). There is no scheduler, no orchestrator. If an input has no provider, the node never fires — that's the most common silent failure.
 - **No cycles.** The validator rejects cycles outright; the runtime would hang on them anyway.
 - **HTTP shape: API in, API out.** A workflow is exposed as an HTTP endpoint by including an `api` node (the request body) and an `api_response` node linked back to it (the response body).
 - **Versioned snapshots.** Every workflow has a mutable `HEAD` revision plus zero or more immutable named revisions. Patches and updates target HEAD; production callers can pin to a named revision.
@@ -155,6 +155,7 @@ That's all there is. Three top-level keys (`nodes`, `edges`, plus metadata); edg
 | `memory` | agent `function` | `{history_policy?, history_policy_n?}`. History is keyed by the node's `thread_id` **input** — wire it from the `api` node so each caller/conversation gets its own thread; a hardcoded literal shares one thread across all callers (leaks history between users; validator warns `SHARED_THREAD_ACROSS_API_CALLERS`). The related `memory_op` input, when set to `reset`, deletes the thread's stored history before the turn (sending the prompt `/clear` is the back-compat equivalent). Note: decay policies (`tiered`, `last-N`, …) trim stored *tool results*, not what the assistant said — assistant text that restated a tool result keeps it in history, so decay is **not** redaction; a PII redactor must rewrite text parts too. |
 | `tool_search` | agent `function` | `{allow?, persist?, scope?}` |
 | `capability_providers` | agent `function` | Capability seat → provider name |
+| `optional`, `required` | `function` | Input names the node runs without / waits for, overriding the function's default — see [Required vs optional inputs](#required-vs-optional-inputs) |
 
 The agent keys are only accepted on a function that declares the matching capability; otherwise you get `CAPABILITY_NOT_SUPPORTED` (or `TOOLS_NOT_SUPPORTED` for `tools:`) rather than a setting that is saved and then ignored.
 
@@ -168,7 +169,25 @@ The agent keys are only accepted on a function that declares the matching capabi
 
 `outputs:` is always a list of names. For `function` nodes you only need to list outputs when you want to override or augment what the registry declares.
 
-**You only have to write the inputs that are required.** `dibbla fn get` reports which those are under `required_inputs`; everything else is optional and can be omitted entirely. Optional inputs are still settable — a value or an edge works fine — they just don't have to be. Engine-injected inputs (`_capability_providers`, `has_credentials`, `_original_system_message`) and the agent's internal `tools` array are not authorable at all and never appear in `wf get` output.
+**You only have to write the inputs that are required.** `dibbla fn get` reports which those are under `required_inputs`; everything else is optional and can be omitted entirely. Optional inputs are still settable — a value or an edge works fine — they just don't have to be. Engine-injected inputs (`_capability_providers`, `has_credentials`, `_original_system_message`) and the agent's internal `tools` array are not authorable at all and never appear in `wf get` output. Which inputs the node actually waits for can be changed per node — next section.
+
+### Required vs optional inputs
+
+A node waits for its **required** inputs and runs without its **optional** ones. The function sets the default (`required_inputs`); two node keys change it, listing only the deviations:
+
+```yaml
+- id: agent
+  type: function
+  function: reasoning_agent_with_toolbox
+  server: function-server
+  optional: [context]        # run without it, even though the function requires it
+  required: [memory.user]    # wait for it, even though it is optional (capability port: <seat>.<port>)
+```
+
+- **Make it required** when the node needs the value and it comes from another node. An optional input fed by a slower node is dropped if the node already ran on its other inputs — the classic "the agent ran without its context" bug.
+- **Make it optional** when the node should run without it (e.g. a caller may leave it out).
+- Names as in `inputs:` (`files`, not `files[]`). `tools`, `files` and engine-set inputs can't be required. An entry that matches the default is dropped; `wf get` lists only real deviations, including ones toggled on the canvas, and every write keeps them.
+- API fields: on `api` and `api_response` every field is required; `optional: [locale]` lets the caller omit it (or the answer lack it), and `wf api-docs` marks it optional. Whatever the omitted field feeds must be optional too, and a wired `response` is always waited for.
 
 ### `wf get` output is re-appliable as-is
 
@@ -364,7 +383,7 @@ dibbla fn get function-server reasoning_agent_function   # full schema for one
 
 | Field | Use |
 |---|---|
-| `required_inputs` | The only inputs you must satisfy. Write these; omit the rest. |
+| `required_inputs` | The inputs a node waits for by default. Write these; omit the rest. Change it per node with `optional:` / `required:`. |
 | `inputs.<name>.required` | Same thing per-input, alongside `type` and `allowed_values` |
 | `inputs.<name>.capability` | Which optional capability an input belongs to |
 | `capabilities` | The agent keys this function accepts (`tools`, `mcp`, `memory`, …) |
@@ -463,7 +482,7 @@ dibbla wf update my_new_workflow -f /tmp/wf.yaml
 | `INVALID_ENUM_VALUE` | An input value is constrained by an `enum:` tag (e.g. valid models) and the value isn't in the allowed list | `dibbla fn get <server> <name>` — the allowed values are listed under each input's `allowed_values` |
 | `UNKNOWN_TOOL_NODE` | An agent's `tools: [foo]` references a node id that doesn't exist | Add the tool node, or fix the id reference |
 | `INVALID_LINK` | `api_response.linked_to` points at a missing node, or at a node that isn't `type: api` | Point it at the corresponding `api` node |
-| `UNSATISFIED_INPUT` | A **required** input has no edge feeding it AND no hardcoded value | Add an edge into that input, or set a value in the node's `inputs:` map. Only inputs in the function's `required_inputs` are checked — optional and capability inputs are not. Tool-node inputs are exempt (filled by the agent at runtime); `collects_values` functions are exempt (handlebars templates) |
+| `UNSATISFIED_INPUT` | A **required** input has no edge feeding it AND no hardcoded value | Add an edge into that input, or set a value in the node's `inputs:` map. Checked on what the node waits for: the function's `required_inputs`, plus the node's `required:`, minus its `optional:`. Tool-node inputs are exempt (filled by the agent at runtime); `collects_values` functions are exempt (handlebars templates) |
 | `TOOLS_NOT_SUPPORTED` | `tools:` on a function that isn't tagged `accepts_tools` | Pick an agent function — `dibbla fn list --tag accepts_tools`. (Previously this was accepted and the tools were silently ignored at runtime.) |
 | `CAPABILITY_NOT_SUPPORTED` | `toolbox_tools:` / `mcp_servers:` / `data_sources:` / `memory:` / `tool_search:` on a function that doesn't declare that capability — or a `capability_providers:` binding on an unsupported seat or a function without that seat | `dibbla fn get <server> <name>` lists the capabilities the function has; provider bindings only work on `memory` / `tool_search` seats |
 | `CAPABILITY_PROVIDER_CONFLICT` | A memory provider is bound and `history_policy` is set to something other than `custom` | Remove the `history_policy` line (binding implies `custom`) or the binding |
@@ -474,6 +493,10 @@ dibbla wf update my_new_workflow -f /tmp/wf.yaml
 | `UNKNOWN_NODE` | Edge references a node id that doesn't exist | Fix the id |
 | `UNKNOWN_PORT` | Edge port name isn't in the node's declared inputs/outputs (registry-declared inputs/outputs count too) | Use `dibbla fn get` to confirm the right names |
 | `DUPLICATE_INPUT_EDGE` | Two edges target the same input port | Remove one — an input only takes one feed |
+| `UNKNOWN_INPUT` | A name in `optional:` / `required:` is not an input of the node | Use the names from `inputs:` / `dibbla fn get` (`files`, not `files[]`; `<seat>.<port>` for a capability port) |
+| `CONFLICTING_INPUT_OVERRIDE` | The same input is in both `optional:` and `required:` | Keep it in one list |
+| `INPUT_NOT_REQUIRABLE` | `required:` names `tools`, `files` or an engine-set input — the node never waits for those | Remove it from `required:` |
+| `OPTIONAL_FIELD_FEEDS_REQUIRED_INPUT` (warning) | An `api` field in `optional:` is wired into an input that still waits for it | Add that input to `optional:` on the consuming node, or the run hangs when the caller omits the field |
 | `CYCLE_DETECTED` | The graph contains a cycle | Restructure; the runtime won't execute cycles. If you need iteration, model it as a sub-workflow called repeatedly |
 
 ### Exit codes — script against these, not against stderr
@@ -520,11 +543,12 @@ Both ends pin to the workflow's HEAD revision unless you pass `--revision <id>`.
 - `wf execute <name> --async` returns immediately with `{"response_metadata":{"run","node","workflow"}}`. Use this when dispatching many runs or when the run is expected to take longer than the agent's terminal patience.
 - `wf execute <name> --follow` (`-f`) is `--async` plus an automatic log-tail. Live operational logs stream to stdout as the run progresses; on the server-emitted `run_completed` sentinel the CLI prints the api_response payload and exits 0. Best for interactive debugging.
 
-Once you have a `runID`, three commands address it:
+Once you have a `runID`, four commands address it:
 
 - `wf logs <runId>` — operational logs (workflow-server orchestration + go-toolserver function/agent calls), tagged with `run` / `workflow` / `node` / `level` / `src`. `--follow` for live; default is historic backfill from the persisted store. Persistence policy: WARN/ERROR + a single `run_completed` sentinel are persisted; INFO/DEBUG are live-only. A quiet finished run will tail to essentially just `run completed`.
 - `wf runs output <runId>` — the api_response payload, identical shape to what a sync execute would return.
-- `wf runs list [-w <name>] [-n <N>]` — find recent run ids without leaving the terminal. Server caps the page size at 500.
+- `wf runs list [-w <name>] [-n <N>]` — find recent run ids without leaving the terminal, with each run's STATUS (`running`, `succeeded`, `failed`, `cancelled`). Server caps the page size at 500.
+- `wf runs cancel <runId>` — stop a run that is still running: steps still executing are told to stop and nothing more of the run starts. Stopping an already stopped run is fine; a run that already finished says so and is left as it is.
 
 ```bash
 # Typical async loop
@@ -535,6 +559,8 @@ dibbla wf runs output 020b1341-…                # fetch the final payload
 ```
 
 For runs that error before the api_response node fires (or workflows with no api_response at all), `wf runs output` returns 404 — the operational `wf logs` view is the meaningful artefact in those cases.
+
+**A run that can never finish fails by itself.** When every step a run started has answered and `api_response` still waits for a value no step produced, the run fails after about 10 seconds with a message naming the waiting field and what it is connected to — e.g. `api_response.error ← agent.error`. The usual cause is a response field connected to an output that is only set on failure (an agent's `error`) on a run where the step succeeded. Fix: mark that field `optional:` on the `api_response` node, or connect it to an output every run sets. A step that is still working (an agent mid-turn, a slow function) keeps the run alive; to stop such a run, `wf runs cancel <runId>`.
 
 ### Use `--follow` for the first execution after any workflow change
 
@@ -557,7 +583,8 @@ Walk this in order — each step is cheap and rules out one class of cause:
 2. **Did pre-flight reject it?** A `422` response with `rule: CYCLE_DETECTED` means a cycle (often the tool+data-edge pattern in §6) — fix the topology. Pre-flight also returns `UNSATISFIABLE_INPUT`, `UNKNOWN_NODE`, `UNKNOWN_PORT`, `INVALID_HANDLE`, `EMPTY_WORKFLOW` for other static issues.
 3. **Did the watchdog fire?** `dibbla wf logs <runId>`. Look for a WARN `run is not making progress`. The attached `diagnosis` field tells you which input on which node is unsatisfied — fix the missing edge or default and retry.
 4. **`function execution failed`?** Function-side error. The most common cause is an input-type mismatch (string into bool, missing required field). The CLI message is the same regardless of panic, returned error, or input deserialization failure — the actual Go error is only in the go-toolserver pod's stdout (`kubectl logs <go-toolserver-pod>` in a Dibbla deployment, or the local console if running locally). Re-check the function's `dibbla fn get` schema and your YAML types.
-5. **None of the above?** Last resort: `wf delete --yes && wf create -f workflow.yaml` to refresh the URL id and clear any orphaned response-channel state. Update production callers' baked-in URL afterward (see §15 footgun).
+5. **Still running and no longer wanted?** `dibbla wf runs cancel <runId>` stops it.
+6. **None of the above?** Last resort: `wf delete --yes && wf create -f workflow.yaml` to refresh the URL id and clear any orphaned response-channel state. Update production callers' baked-in URL afterward (see §15 footgun).
 
 ### Calling a workflow from production code (HTTP)
 
